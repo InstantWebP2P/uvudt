@@ -125,8 +125,8 @@ void CTimer::rdtsc(uint64_t &x)
       //SetThreadAffinityMask(hCurThread, dwOldMask);
       if (!ret)
          x = getTime() * s_ullCPUFrequency;
-#elif defined(OSX)
-      x = mach_absolute_time();
+#elif defined(OSX) || defined(DARWIN)
+       x = mach_absolute_time();
 #else
       // use system call to read time clock in Nanosecs for other archs
       x = getTime(true) * s_ullCPUFrequency / 1000ULL;
@@ -160,7 +160,7 @@ uint64_t CTimer::readCPUFrequency()
       int64_t ccf;
       if (QueryPerformanceFrequency((LARGE_INTEGER *)&ccf))
          frequency = ccf / 1000000;
-   #elif defined(OSX)
+   #elif defined(OSX) || defined(DARWIN)
       mach_timebase_info_data_t info;
       mach_timebase_info(&info);
       frequency = info.denom * 1000ULL / info.numer;
