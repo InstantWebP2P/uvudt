@@ -13,6 +13,7 @@
 struct uvudt_connect_s;
 struct uvudt_shutdown_s;
 struct uvudt_write_s;
+struct uvudt_req_s;
 struct uvudt_s;
 
 // callback
@@ -23,7 +24,7 @@ typedef void (* uvudt_read_cb)(struct uvudt_s *stream, ssize_t nread, const uv_b
 typedef void (* uvudt_connection_cb)(struct uvudt_s *server, int status);
 
 // state flags
-enum uvudt_flags_t
+enum uvudt_flags_e
 {
     UVUDT_FLAG_READABLE = 0x01,
     UVUDT_FLAG_WRITABLE = 0x02,
@@ -64,12 +65,20 @@ struct uvudt_s
 typedef struct uvudt_s uvudt_t;
 
 // request type
-enum uvudt_req_t
+enum uvudt_req_e
 {
     UVUDT_REQ_CONNECT  = 1,
     UVUDT_REQ_SHUTDOWN = 2,
     UVUDT_REQ_WRITE    = 3,
 };
+struct uvudt_req_s 
+{
+    int type;
+    int error;
+    uvudt_t *handle;
+    void *data;
+};
+typedef struct uvudt_req_s uvudt_req_t;
 
 // uvudt_connect_t
 struct uvudt_connect_s
@@ -80,7 +89,6 @@ struct uvudt_connect_s
     void *data;
 
     void *queue[2];
-
     uvudt_connect_cb cb;
 };
 typedef struct uvudt_connect_s uvudt_connect_t;
@@ -108,7 +116,6 @@ struct uvudt_write_s {
     uv_buf_t *bufs;
     unsigned int nbufs;
     uv_buf_t bufsml[4];
-
     uvudt_write_cb cb;
 };
 typedef struct uvudt_write_s uvudt_write_t;
