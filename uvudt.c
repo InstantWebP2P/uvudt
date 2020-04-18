@@ -63,6 +63,11 @@ int uvudt_init(uv_loop_t *loop, uvudt_t *udt)
     return 0;
 }
 
+int uvudt_open(uvudt_t* handle, uv_os_sock_t sock) {
+  return uvudt_bindfd(handle, sock, 1, 1);
+}
+
+
 int uvudt_close(uvudt_t *udt, uv_close_cb close_cb) {
     int rc = 0;
     uv_poll_t *poll = (uv_poll_t *)udt;
@@ -223,83 +228,75 @@ extern void udt__stream_io(uv_poll_t *handle, int status, int events);
 }
 
 // binding on existing udp socket/fd ///////////////////////////////////////////
-int uvudt_bindfd(
-    uvudt_t *udt,
-    int udpfd,
-    int reuseaddr,
-    int reuseable)
-{
-    int status;
-    int optlen;
+int uvudt_bindfd(uvudt_t* udt,
+                 uv_os_sock_t udpfd,
+                 int reuseaddr,
+                 int reuseable) {
+  int status;
+  int optlen;
 
-    status = -1;
+  status = -1;
 
-    if (udt->udtfd < 0)
-    {
-        // extract domain info by existing udpfd ///////////////////////////////
-        struct sockaddr_storage addr;
-        socklen_t addrlen = sizeof(addr);
-        int domain = AF_INET;
+  if (udt->udtfd < 0) {
+    // extract domain info by existing udpfd ///////////////////////////////
+    struct sockaddr_storage addr;
+    socklen_t addrlen = sizeof(addr);
+    int domain = AF_INET;
 
-        if (getsockname(udpfd, (struct sockaddr *)&addr, &addrlen) < 0)
-        {
-            ///(poll.loop, errno);
-            goto out;
-        }
-        domain = addr.ss_family;
-        ////////////////////////////////////////////////////////////////////////
+    if (getsockname(udpfd, (struct sockaddr*)&addr, &addrlen) < 0) {
+      ///(poll.loop, errno);
+      goto out;
+    }
+    domain = addr.ss_family;
+    ////////////////////////////////////////////////////////////////////////
 
-        if ((udt->udtfd = udt_socket(domain, SOCK_STREAM, 0)) == -1)
-        {
-            goto out;
-        }
-
-        // fill Osfd
-        assert(udt_getsockopt(udt->udtfd, 0, (int)UDT_UDT_OSFD, &udt->fd, &optlen) == 0);
-
-        // check if REUSE ADDR ///////////
-        if (reuseaddr >= 0)
-        {
-            udt_setsockopt(udt->udtfd, 0, (int)UDT_UDT_REUSEADDR, &reuseaddr, sizeof reuseaddr);
-        }
-        // check if allow REUSE ADDR
-        if (reuseable >= 0)
-        {
-            udt_setsockopt(udt->udtfd, 0, (int)UDT_UDT_REUSEABLE, &reuseable, sizeof reuseable);
-        }
-        ///////////////////////////////////
-
-        if (udt__stream_open(udt, udt->fd, UVUDT_FLAG_READABLE | UVUDT_FLAG_WRITABLE))
-        {
-            udt_close(udt->udtfd);
-            udt->udtfd = -1;
-            status = -2;
-            goto out;
-        }
+    if ((udt->udtfd = udt_socket(domain, SOCK_STREAM, 0)) == -1) {
+      goto out;
     }
 
-    assert(udt->udtfd != -1);
+    // fill Osfd
+    assert(udt_getsockopt(
+               udt->udtfd, 0, (int)UDT_UDT_OSFD, &udt->fd, &optlen) == 0);
 
-    udt->delayed_error = 0;
-    if (udt_bind2(udt->udtfd, udpfd) == -1)
-    {
-        if (udt_getlasterror_code() == UDT_EBOUNDSOCK)
-        {
-            udt->delayed_error = EADDRINUSE;
-        }
-        else
-        {
-            goto out;
-        }
+    // check if REUSE ADDR ///////////
+    if (reuseaddr >= 0) {
+      udt_setsockopt(
+          udt->udtfd, 0, (int)UDT_UDT_REUSEADDR, &reuseaddr, sizeof reuseaddr);
     }
-    status = 0;
+    // check if allow REUSE ADDR
+    if (reuseable >= 0) {
+      udt_setsockopt(
+          udt->udtfd, 0, (int)UDT_UDT_REUSEABLE, &reuseable, sizeof reuseable);
+    }
+    ///////////////////////////////////
+
+    if (udt__stream_open(
+            udt, udt->fd, UVUDT_FLAG_READABLE | UVUDT_FLAG_WRITABLE)) {
+      udt_close(udt->udtfd);
+      udt->udtfd = -1;
+      status = -2;
+      goto out;
+    }
+  }
+
+  assert(udt->udtfd != -1);
+
+  udt->delayed_error = 0;
+  if (udt_bind2(udt->udtfd, udpfd) == -1) {
+    if (udt_getlasterror_code() == UDT_EBOUNDSOCK) {
+      udt->delayed_error = EADDRINUSE;
+    } else {
+      goto out;
+    }
+  }
+  status = 0;
 
 out:
     return status;
 }
 /////////////////////////////////////////////////////////////////////////////////
 
-int uvudt_getsockname(uvudt_t *udt, const struct sockaddr *name, int *namelen)
+int uvudt_getsockname(const uvudt_t *udt, struct sockaddr *name, int *namelen)
 {
     int rv = 0;
 
@@ -324,7 +321,7 @@ out:
     return rv;
 }
 
-int uvudt_getpeername(uvudt_t *udt, const struct sockaddr *name, int *namelen)
+int uvudt_getpeername(const uvudt_t *udt, struct sockaddr *name, int *namelen)
 {
     int rv = 0;
 

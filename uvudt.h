@@ -5,9 +5,12 @@
 
 #ifndef __UVUDT_H__
 #define __UVUDT_H__
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 #include "uv.h"
-#include "udtqueue.h"
+#include "queue.h"
 
 // request type
 struct uvudt_connect_s;
@@ -26,12 +29,17 @@ typedef void (* uvudt_connection_cb)(struct uvudt_s *server, int status);
 // state flags
 enum uvudt_flags_e
 {
-    UVUDT_FLAG_READABLE = 0x01,
-    UVUDT_FLAG_WRITABLE = 0x02,
-    UVUDT_FLAG_SHUT     = 0x04,
-    UVUDT_FLAG_SHUTTING = 0x08,
-    UVUDT_FLAG_CLOSING  = 0x10,
-    UVUDT_FLAG_CLOSED   = 0x20,
+    UVUDT_FLAG_READABLE  = 0x0001,
+    UVUDT_FLAG_WRITABLE  = 0x0002,
+    UVUDT_FLAG_SHUT      = 0x0004,
+    UVUDT_FLAG_SHUTTING  = 0x0008,
+    UVUDT_FLAG_CLOSING   = 0x0010,
+    UVUDT_FLAG_CLOSED    = 0x0020,
+
+    UVUDT_FLAG_REUSEADDR = 0x0100,
+    UVUDT_FLAG_REUSEABLE = 0x0200,
+    
+    UVUDT_FLAG_IPV6ONLY  = 0x1000,
 };
 
 // uvudt_t
@@ -135,12 +143,17 @@ UV_EXTERN int uvudt_bind(uvudt_t *handle,
                          int reuseaddr, 
                          int reuseable);
 
-UV_EXTERN int uvudt_getsockname(uvudt_t *handle, 
-                                const struct sockaddr *name, 
-                                int *namelen);
+UV_EXTERN int uvudt_bindfd(uvudt_t* handle,
+                           uv_os_sock_t udpfd,
+                           int reuseaddr,
+                           int reuseable);
 
-UV_EXTERN int uvudt_getpeername(uvudt_t *handle, 
-                                const struct sockaddr *name, 
+UV_EXTERN int uvudt_getsockname(const uvudt_t* handle,
+                                struct sockaddr* name,
+                                int* namelen);
+
+UV_EXTERN int uvudt_getpeername(const uvudt_t *handle, 
+                                struct sockaddr *name, 
                                 int *namelen);
 
 UV_EXTERN int uvudt_close(uvudt_t *handle, uv_close_cb close_cb);
@@ -283,4 +296,7 @@ typedef struct uvudt_netperf_s
 
 UV_EXTERN int uvudt_getperf(uvudt_t *handle, uvudt_netperf_t *perf, int clear);
 
+#ifdef __cplusplus
+}
+#endif
 #endif // __UVUDT_H__

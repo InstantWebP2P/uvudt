@@ -690,9 +690,44 @@ int uvudt_write(uvudt_write_t *req, uvudt_t *stream, const uv_buf_t bufs[], unsi
     return 0;
 }
 
-int uvudt_try_write(uvudt_t* handle, const uv_buf_t bufs[], unsigned int nbufs) {
-    // TBD ...
+static void uvudt_try_write_cb(uvudt_write_t* req, int status) {
+  /* Should not be called */
+  abort();
+}
+
+int uvudt_try_write(uvudt_t* stream,
+                    const uv_buf_t bufs[],
+                    unsigned int nbufs) {
+  int r;
+  size_t written;
+  size_t req_size;
+  uvudt_write_t req;
+
+  /* Connecting or already writing some data */
+  if (stream->connect_req != NULL || stream->write_queue_size != 0)
     return UV_EAGAIN;
+
+  r = uvudt_write(&req, stream, bufs, nbufs, uvudt_try_write_cb);
+  if (r != 0) return r;
+
+  /* Remove not written bytes from write queue size */
+  written = udt__buf_count(bufs, nbufs);
+  if (req.bufs != NULL)
+    req_size = udt__write_req_size(&req);
+  else
+    req_size = 0;
+  written -= req_size;
+  stream->write_queue_size -= req_size;
+
+  /* Unqueue request, regardless of immediateness */
+  QUEUE_REMOVE(&req.queue);
+  if (req.bufs != req.bufsml) free(req.bufs);
+  req.bufs = NULL;
+
+  if (written == 0 && req_size != 0)
+    return req.error < 0 ? req.error : UV_EAGAIN;
+  else
+    return written;
 }
 
 int uvudt_write2(
@@ -763,3 +798,7 @@ int uvudt_is_writable(uvudt_t* stream) {
     return stream->flags & UVUDT_FLAG_WRITABLE;
 }
 
+
+int uvudt_set_blocking(uvudt_t* handle, int blocking) {
+    return udt__nonblock(!blocking);
+}
