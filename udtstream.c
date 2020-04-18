@@ -690,6 +690,22 @@ int uvudt_write(uvudt_write_t *req, uvudt_t *stream, const uv_buf_t bufs[], unsi
     return 0;
 }
 
+int uvudt_try_write(uvudt_t* handle, const uv_buf_t bufs[], unsigned int nbufs) {
+    // TBD ...
+    return UV_EAGAIN;
+}
+
+int uvudt_write2(
+    uvudt_write_t* req,
+    uvudt_t* stream,
+    const uv_buf_t bufs[],
+    unsigned int nbufs,
+    uv_stream_t* send_handle,  // !!! not used, for compatibility with Node.js
+    uvudt_write_cb cb) 
+    {
+        assert(send_handle == NULL);
+        return uvudt_write(req, stream, bufs, nbufs, cb);
+    }
 
 int uvudt_read_start(uvudt_t *stream, uv_alloc_cb alloc_cb,
                      uvudt_read_cb read_cb)

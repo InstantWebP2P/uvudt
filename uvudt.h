@@ -123,8 +123,8 @@ typedef struct uvudt_write_s uvudt_write_t;
 // Public API
 UV_EXTERN int uvudt_init(uv_loop_t *loop, uvudt_t *handle);
 UV_EXTERN int uvudt_open(uvudt_t *handle, uv_os_sock_t sock);
-UV_EXTERN int uvudt_nodelay(uvudt_t *handle, int enable);
 
+UV_EXTERN int uvudt_nodelay(uvudt_t *handle, int enable);
 UV_EXTERN int uvudt_keepalive(uvudt_t *handle, 
                               int enable, 
                               unsigned int delay);
@@ -159,7 +159,7 @@ UV_EXTERN int uvudt_shutdown(uvudt_shutdown_t *req,
                              uvudt_t *handle,
                              uvudt_shutdown_cb cb);
 
-UV_EXTERN size_t uvudt_stream_get_write_queue_size(uvudt_t *stream);
+UV_EXTERN size_t uvudt_get_write_queue_size(uvudt_t *stream);
 
 UV_EXTERN int uvudt_listen(uvudt_t *stream, 
                            int backlog, 
@@ -179,6 +179,13 @@ UV_EXTERN int uvudt_write(uvudt_write_t *req,
                           unsigned int nbufs,
                           uvudt_write_cb cb);
 
+UV_EXTERN int uvudt_write2(uvudt_write_t* req,
+                           uvudt_t* handle,
+                           const uv_buf_t bufs[],
+                           unsigned int nbufs,
+                           uv_stream_t* send_handle, // !!! not used, for compatibility with Node.js
+                           uvudt_write_cb cb);
+
 UV_EXTERN int uvudt_try_write(uvudt_t *handle, 
                               const uv_buf_t bufs[], 
                               unsigned int nbufs);
@@ -187,9 +194,9 @@ UV_EXTERN int uvudt_is_readable(uvudt_t *handle);
 
 UV_EXTERN int uvudt_is_writable(uvudt_t *handle);
 
-UV_EXTERN int uvudt_stream_set_blocking(uvudt_t *handle, int blocking);
+UV_EXTERN int uvudt_set_blocking(uvudt_t *handle, int blocking);
 
-UV_EXTERN size_t uvudt_stream_get_write_queue_size(uvudt_t *stream);
+UV_EXTERN size_t uvudt_get_write_queue_size(uvudt_t *stream);
 
 UV_EXTERN int uvudt_nodelay(uvudt_t *handle, int enable);
 
