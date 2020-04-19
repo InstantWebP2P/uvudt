@@ -736,11 +736,10 @@ int uvudt_write2(
     const uv_buf_t bufs[],
     unsigned int nbufs,
     uv_stream_t* send_handle,  // !!! not used, for compatibility with Node.js
-    uvudt_write_cb cb) 
-    {
-        assert(send_handle == NULL);
-        return uvudt_write(req, stream, bufs, nbufs, cb);
-    }
+    uvudt_write_cb cb) {
+  assert(send_handle == NULL);
+  return uvudt_write(req, stream, bufs, nbufs, cb);
+}
 
 int uvudt_read_start(uvudt_t *stream, uv_alloc_cb alloc_cb,
                      uvudt_read_cb read_cb)
@@ -801,4 +800,9 @@ int uvudt_is_writable(uvudt_t* stream) {
 
 int uvudt_set_blocking(uvudt_t* handle, int blocking) {
     return udt__nonblock(!blocking);
+}
+
+
+size_t uvudt_get_write_queue_size(const uvudt_t* stream) {
+  return stream->write_queue_size;
 }

@@ -38,7 +38,8 @@ enum uvudt_flags_e
 
     UVUDT_FLAG_REUSEADDR = 0x0100,
     UVUDT_FLAG_REUSEABLE = 0x0200,
-    
+    UVUDT_FLAG_RENDEZ    = 0x0400,
+
     UVUDT_FLAG_IPV6ONLY  = 0x1000,
 };
 
@@ -143,11 +144,6 @@ UV_EXTERN int uvudt_bind(uvudt_t *handle,
                          int reuseaddr, 
                          int reuseable);
 
-UV_EXTERN int uvudt_bindfd(uvudt_t* handle,
-                           uv_os_sock_t udpfd,
-                           int reuseaddr,
-                           int reuseable);
-
 UV_EXTERN int uvudt_getsockname(const uvudt_t* handle,
                                 struct sockaddr* name,
                                 int* namelen);
@@ -172,7 +168,7 @@ UV_EXTERN int uvudt_shutdown(uvudt_shutdown_t *req,
                              uvudt_t *handle,
                              uvudt_shutdown_cb cb);
 
-UV_EXTERN size_t uvudt_get_write_queue_size(uvudt_t *stream);
+UV_EXTERN size_t uvudt_get_write_queue_size(const uvudt_t *stream);
 
 UV_EXTERN int uvudt_listen(uvudt_t *stream, 
                            int backlog, 
@@ -209,14 +205,6 @@ UV_EXTERN int uvudt_is_writable(uvudt_t *handle);
 
 UV_EXTERN int uvudt_set_blocking(uvudt_t *handle, int blocking);
 
-UV_EXTERN size_t uvudt_get_write_queue_size(uvudt_t *stream);
-
-UV_EXTERN int uvudt_nodelay(uvudt_t *handle, int enable);
-
-UV_EXTERN int uvudt_keepalive(uvudt_t *handle, 
-                              int enable, 
-                              unsigned int delay);
-
 // enable/disable UDT socket in rendezvous mode
 UV_EXTERN int uvudt_setrendez(uvudt_t *handle, int enable);
 
@@ -232,7 +220,7 @@ UV_EXTERN int uvudt_setmbs(uvudt_t *handle,
                            int32_t mudt, 
                            int32_t mudp);
 
-// et UDT socket security mode
+// set UDT socket security mode
 UV_EXTERN int uvudt_setsec(uvudt_t *handle, 
                            int32_t mode, 
                            unsigned char keybuf[], 

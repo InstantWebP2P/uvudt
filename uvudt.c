@@ -698,3 +698,38 @@ int udt__nonblock(int udtfd, int set)
 
     return (rc1 | rc2);
 }
+
+int uvudt_udpfd(uvudt_t* handle, uv_os_sock_t* udpfd) {
+  int optlen;
+
+  return udt_getsockopt(handle->udtfd, 0, (int)UDT_UDT_UDPFD, udpfd, &optlen);
+}
+
+int uvudt_reuseaddr(uvudt_t* handle, int32_t yes) {
+  int optval = yes;
+
+  return udt_setsockopt(
+      handle->udtfd, 0, (int)UDT_UDT_REUSEADDR, &optval, sizeof optval);
+}
+
+int uvudt_reuseable(uvudt_t* handle, int32_t yes) {
+  int optval = yes;
+
+  return udt_setsockopt(
+      handle->udtfd, 0, (int)UDT_UDT_REUSEABLE, &optval, sizeof optval);
+}
+
+int uvudt_setrendez(uvudt_t* handle, int enable) {
+    int rndz = enable ? 1 : 0;
+    
+    if (handle->udtfd != -1 &&
+        udt_setsockopt(handle->udtfd, 0, UDT_UDT_RENDEZVOUS, &rndz, sizeof(rndz)))
+	    return -1;
+
+	if (enable)
+		handle->flags |=  UVUDT_FLAG_RENDEZ;
+	else
+		handle->flags &= ~UVUDT_FLAG_RENDEZ;
+
+	return 0;
+}
