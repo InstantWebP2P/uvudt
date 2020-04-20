@@ -12,12 +12,8 @@
 // consume UDT Os fd event
 static void udt_consume_osfd(int os_fd)
 {
-    int saved_errno;
     char dummy;
-
     recv(os_fd, &dummy, sizeof(dummy), 0);
-
-    saved_errno;
 }
 
 // UDT socket api
@@ -69,7 +65,7 @@ int uvudt_open(uvudt_t* handle, uv_os_sock_t sock) {
 
 
 int uvudt_close(uvudt_t *udt, uv_close_cb close_cb) {
-    int rc = 0;
+    int rc = 0, docb = 0;
     uv_poll_t *poll = (uv_poll_t *)udt;
 
     // set closing flag
@@ -88,8 +84,10 @@ int uvudt_close(uvudt_t *udt, uv_close_cb close_cb) {
        }
        // close uv_poll_t
        uv_close(poll, close_cb);
-    }
-
+    } else {
+       docb = close_cb != NULL ? 1 : 0;
+	}
+	
     // clear pending Os fd event,then close UDT socket
     udt_consume_osfd(udt->fd);
     udt_close(udt->udtfd); udt->udtfd = -1;
@@ -102,6 +100,9 @@ int uvudt_close(uvudt_t *udt, uv_close_cb close_cb) {
 
     // set closed flag
     udt->flags |=  UVUDT_FLAG_CLOSED;
+	
+	// callback immediately
+	if (docb) close_cb(udt);
 
 out:
     return rc;
@@ -174,12 +175,14 @@ extern void udt__stream_io(uv_poll_t *handle, int status, int events);
 {
     int r;
 
-    socklen_t addrlen = (addr->sa_family == AF_INET6) ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in);
+    socklen_t addrlen = (addr->sa_family == AF_INET6) ? 
+		                 sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in);
 
     if (udt->connect_req)
         return EALREADY;
 
-    if (maybe_new_socket(udt, addr->sa_family, UVUDT_FLAG_READABLE | UVUDT_FLAG_WRITABLE))
+    if (maybe_new_socket(udt, addr->sa_family, 
+						 UVUDT_FLAG_READABLE | UVUDT_FLAG_WRITABLE))
     {
         return -1;
     }
@@ -217,7 +220,8 @@ extern void udt__stream_io(uv_poll_t *handle, int status, int events);
     udt->connect_req = req;
 
     // start stream
-    if (udt__stream_open(udt, udt->fd, UVUDT_FLAG_READABLE | UVUDT_FLAG_WRITABLE))
+    if (udt__stream_open(udt, udt->fd, 
+						 UVUDT_FLAG_READABLE | UVUDT_FLAG_WRITABLE))
     {
         udt_close(udt->udtfd);
         udt->udtfd = -1;
@@ -297,7 +301,8 @@ out:
 }
 /////////////////////////////////////////////////////////////////////////////////
 
-int uvudt_getsockname(const uvudt_t *udt, struct sockaddr *name, int *namelen)
+int uvudt_getsockname(const uvudt_t *udt, 
+					  struct sockaddr *name, int *namelen)
 {
     int rv = 0;
 
@@ -322,7 +327,8 @@ out:
     return rv;
 }
 
-int uvudt_getpeername(const uvudt_t *udt, struct sockaddr *name, int *namelen)
+int uvudt_getpeername(const uvudt_t *udt, 
+					  struct sockaddr *name, int *namelen)
 {
     int rv = 0;
 
@@ -349,14 +355,16 @@ out:
 
 extern void udt__server_io(uv_poll_t *handle, int status, int events);
 
-int uvudt_listen(uvudt_t *udt, int backlog, uvudt_connection_cb cb)
+int uvudt_listen(uvudt_t *udt, 
+				 int backlog, uvudt_connection_cb cb)
 {
     uv_poll_t *poll = (uv_poll_t *)udt;
 
     if (udt->delayed_error)
         return udt->delayed_error;
 
-    if (maybe_new_socket(udt, AF_INET, UVUDT_FLAG_READABLE | UVUDT_FLAG_WRITABLE))
+    if (maybe_new_socket(udt, AF_INET, 
+						 UVUDT_FLAG_READABLE | UVUDT_FLAG_WRITABLE))
         return -1;
 
     if (udt_listen(udt->udtfd, backlog) < 0)
@@ -389,7 +397,8 @@ int uvudt_nodelay(uvudt_t *udt, int enable)
     return 0;
 }
 
-int uvudt_keepalive(uvudt_t *udt, int enable, unsigned int delay)
+int uvudt_keepalive(uvudt_t *udt, 
+					int enable, unsigned int delay)
 {
     return 0;
 }
@@ -430,7 +439,8 @@ int uvudt_setmbs(uvudt_t *udt, int32_t mfc, int32_t mudt, int32_t mudp)
     return 0;
 }
 
-int uvudt_setsec(uvudt_t *udt, int32_t mode, unsigned char key_buf[], int32_t key_len)
+int uvudt_setsec(uvudt_t *udt, 
+				 int32_t mode, unsigned char key_buf[], int32_t key_len)
 {
     if (udt->udtfd != -1 &&
        (udt_setsockopt(udt->udtfd, 0, UDT_UDT_SECKEY, key_buf, (32 < key_len) ? 32 : key_len)) ||
@@ -440,10 +450,12 @@ int uvudt_setsec(uvudt_t *udt, int32_t mode, unsigned char key_buf[], int32_t ke
     return 0;
 }
 
-int uvudt_punchhole(uvudt_t *udt, const struct sockaddr * addr, int32_t from, int32_t to)
+int uvudt_punchhole(uvudt_t *udt, 
+					const struct sockaddr * addr, int32_t from, int32_t to)
 {
     assert(addr != NULL);
-    socklen_t addrlen = (addr->sa_family == AF_INET6) ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in);
+    socklen_t addrlen = (addr->sa_family == AF_INET6) ? 
+		                 sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in);
 
     if (udt->udtfd != -1 &&
         udt_punchhole(udt->udtfd, addr, addrlen, from, to))
@@ -452,7 +464,8 @@ int uvudt_punchhole(uvudt_t *udt, const struct sockaddr * addr, int32_t from, in
     return 0;
 }
 
-int uvudt_getperf(uvudt_t *udt, uvudt_netperf_t *perf, int clear)
+int uvudt_getperf(uvudt_t *udt, 
+				  uvudt_netperf_t *perf, int clear)
 {
     UDT_TRACEINFO lperf;
 
@@ -516,7 +529,8 @@ int uvudt_getperf(uvudt_t *udt, uvudt_netperf_t *perf, int clear)
 int uvudt_translate_udt_error()
 {
 #ifdef UDT_DEBUG
-    fprintf(stdout, "func:%s, line:%d, errno: %d, %s\n", __FUNCTION__, __LINE__, udt_getlasterror_code(), udt_getlasterror_desc());
+    fprintf(stdout, "func:%s, line:%d, errno: %d, %s\n", 
+			__FUNCTION__, __LINE__, udt_getlasterror_code(), udt_getlasterror_desc());
 #endif
 
     switch (udt_getlasterror_code())
@@ -626,23 +640,28 @@ int udt__socket(int domain, int type, int protocol)
     // - ??? or            from 25600 to 5120, UDT/UDP buffer from 10M/1M to 2M/200K
     // TBD...
     optval = 5120;
-    if (udt_setsockopt(udtfd, 0, (int)UDT_UDT_FC, (void *)&optval, sizeof(optval)))
+    if (udt_setsockopt(udtfd, 0, 
+					   (int)UDT_UDT_FC, (void *)&optval, sizeof(optval)))
     {
         udt_close(udtfd);
         udtfd = -1;
         goto out;
     }
     optval = 204800;
-    if (udt_setsockopt(udtfd, 0, (int)UDT_UDP_SNDBUF, (void *)&optval, sizeof(optval)) |
-        udt_setsockopt(udtfd, 0, (int)UDT_UDP_RCVBUF, (void *)&optval, sizeof(optval)))
+    if (udt_setsockopt(udtfd, 0, 
+					   (int)UDT_UDP_SNDBUF, (void *)&optval, sizeof(optval)) |
+        udt_setsockopt(udtfd, 0, 
+					   (int)UDT_UDP_RCVBUF, (void *)&optval, sizeof(optval)))
     {
         udt_close(udtfd);
         udtfd = -1;
         goto out;
     }
     optval = 2048000;
-    if (udt_setsockopt(udtfd, 0, (int)UDT_UDT_SNDBUF, (void *)&optval, sizeof(optval)) |
-        udt_setsockopt(udtfd, 0, (int)UDT_UDT_RCVBUF, (void *)&optval, sizeof(optval)))
+    if (udt_setsockopt(udtfd, 0, 
+					   (int)UDT_UDT_SNDBUF, (void *)&optval, sizeof(optval)) |
+        udt_setsockopt(udtfd, 0, 
+					   (int)UDT_UDT_RCVBUF, (void *)&optval, sizeof(optval)))
     {
         udt_close(udtfd);
         udtfd = -1;
@@ -694,8 +713,10 @@ int udt__nonblock(int udtfd, int set)
     int block = (set ? 0 : 1);
     int rc1, rc2;
 
-    rc1 = udt_setsockopt(udtfd, 0, (int)UDT_UDT_SNDSYN, (void *)&block, sizeof(block));
-    rc2 = udt_setsockopt(udtfd, 0, (int)UDT_UDT_RCVSYN, (void *)&block, sizeof(block));
+    rc1 = udt_setsockopt(udtfd, 0, 
+						 (int)UDT_UDT_SNDSYN, (void *)&block, sizeof(block));
+    rc2 = udt_setsockopt(udtfd, 0, 
+						 (int)UDT_UDT_RCVSYN, (void *)&block, sizeof(block));
 
     return (rc1 | rc2);
 }
@@ -703,7 +724,8 @@ int udt__nonblock(int udtfd, int set)
 int uvudt_udpfd(uvudt_t* handle, uv_os_sock_t* udpfd) {
   int optlen;
 
-  return udt_getsockopt(handle->udtfd, 0, (int)UDT_UDT_UDPFD, udpfd, &optlen);
+  return udt_getsockopt(handle->udtfd, 0, 
+						(int)UDT_UDT_UDPFD, udpfd, &optlen);
 }
 
 int uvudt_reuseaddr(uvudt_t* handle, int32_t yes) {
@@ -724,7 +746,8 @@ int uvudt_setrendez(uvudt_t* handle, int enable) {
     int rndz = enable ? 1 : 0;
     
     if (handle->udtfd != -1 &&
-        udt_setsockopt(handle->udtfd, 0, UDT_UDT_RENDEZVOUS, &rndz, sizeof(rndz)))
+        udt_setsockopt(handle->udtfd, 0, 
+					   UDT_UDT_RENDEZVOUS, &rndz, sizeof(rndz)))
 	    return -1;
 
 	if (enable)
