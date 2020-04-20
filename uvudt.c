@@ -57,7 +57,7 @@ int uvudt_init(uv_loop_t *loop, uvudt_t *udt)
     }
     
     // early uvudt_t init
-    memset(udt, 0, sizeof(*udt));
+    ///memset(udt, 0, sizeof(*udt));
     udt__stream_init(loop, udt);
 
     return 0;

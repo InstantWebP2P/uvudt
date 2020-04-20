@@ -140,6 +140,7 @@ static int udt4_echo_start(int port) {
 
   assert(0 == uv_ip4_addr("0.0.0.0", port, &addr));
 
+  memset(&udtServer, 0, sizeof(udtServer));
   server = &udtServer;
 
   r = uvudt_init(loop, &udtServer);
@@ -173,6 +174,7 @@ static int udt6_echo_start(int port) {
 
   assert(0 == uv_ip6_addr("::1", port, &addr6));
 
+  memset(&udt6Server, 0, sizeof(udt6Server));
   server6 = &udt6Server;
 
   r = uvudt_init(loop, &udt6Server);

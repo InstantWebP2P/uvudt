@@ -40,14 +40,20 @@ void udt__stream_io(uv_poll_t *handle, int status, int events);
 void udt__stream_init(uv_loop_t* loop, uvudt_t* stream) {
   // hold loop
   stream->aloop = loop;
+  stream->flags = 0;
 
   stream->alloc_cb = NULL;
+  stream->read_cb = NULL;
   stream->connection_cb = NULL;
   stream->connect_req = NULL;
   stream->shutdown_req = NULL;
   stream->accepted_udtfd = -1;
   stream->udtfd = -1;
+  stream->udpfd = -1;
+  stream->fd = -1;
   stream->accepted_udtfd = -1;
+  stream->accepted_udpfd = -1;
+  stream->accepted_fd = -1;
   stream->delayed_error = 0;
   QUEUE_INIT(&stream->write_queue);
   QUEUE_INIT(&stream->write_completed_queue);
