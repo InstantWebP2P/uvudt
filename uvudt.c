@@ -255,8 +255,9 @@ int uvudt_bindfd(uvudt_t* udt,
     }
 
     // fill Osfd
-    assert(udt_getsockopt(
-               udt->udtfd, 0, (int)UDT_UDT_OSFD, &udt->fd, &optlen) == 0);
+    if (udt_getsockopt(udt->udtfd, 0, (int)UDT_UDT_OSFD, &udt->fd, &optlen)) {
+        goto out;
+    }
 
     // check if REUSE ADDR ///////////
     if (reuseaddr >= 0) {

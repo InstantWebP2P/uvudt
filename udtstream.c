@@ -172,14 +172,17 @@ void udt__server_io(uv_poll_t *handle, int status, int events) {
 			  }
 		  } else {
 			  stream->accepted_udtfd = udtfd;
-			  // fill Os fd
-			  assert(udt_getsockopt(udtfd, 0, (int)UDT_UDT_OSFD, &stream->accepted_fd, &optlen) == 0);
-              
-              stream->connection_cb(stream, 0);
-			  if (stream->accepted_udtfd != -1) {
-				  /* The user hasn't yet accepted called uvudt_accept() */
-                  return;
-			  }
+			  // fill Os fd in case socket broken
+			  if (udt_getsockopt(udtfd, 0, (int)UDT_UDT_OSFD, &stream->accepted_fd, &optlen)) {
+                  stream->connection_cb(stream, UV_ECONNABORTED);
+              } else {
+                  stream->connection_cb(stream, 0);
+              }
+          }
+          
+          if (stream->accepted_udtfd != -1) {
+              /* The user hasn't yet accepted called uvudt_accept() */
+              return;
 		  }
   }
 }
