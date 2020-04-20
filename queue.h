@@ -13,8 +13,8 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#ifndef _UDT_QUEUE_H_
-#define _UDT_QUEUE_H_
+#ifndef _QUEUE_H_
+#define _QUEUE_H_
 
 #include <stddef.h>
 
@@ -105,4 +105,4 @@ typedef void *QUEUE[2];
   }                                                                           \
   while (0)
 
-#endif /* _UDT_QUEUE_H_ */
+#endif /* _QUEUE_H_ */

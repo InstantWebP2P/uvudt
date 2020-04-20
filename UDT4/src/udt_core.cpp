@@ -1176,13 +1176,13 @@ POST_CONNECT:
    // acknowledge the management module.
    s_UDTUnited.connect_complete(m_SocketID);
 
-   // acknowledge any waiting epolls to write
-   s_UDTUnited.m_EPoll.update_events(m_SocketID, m_sPollID, UDT_EPOLL_OUT, true);
-
    // trigger event pipe
    ///printf("%s.%s.%d, trigger Connected...", __FILE__, __FUNCTION__, __LINE__);
    feedOsfd();
    ///printf("done\n");
+   
+   // acknowledge any waiting epolls to write
+   s_UDTUnited.m_EPoll.update_events(m_SocketID, m_sPollID, UDT_EPOLL_OUT, true);
 
    return 0;
 }
@@ -2263,13 +2263,13 @@ void CUDT::sendCtrl(int pkttype, void* lparam, void* rparam, int size)
                SetEvent(m_RecvDataCond);
          #endif
 
-         // acknowledge any waiting epolls to read
-         s_UDTUnited.m_EPoll.update_events(m_SocketID, m_sPollID, UDT_EPOLL_IN, true);
+            // trigger event pipe
+            ///printf("%s.%s.%d, trigger Sent...", __FILE__, __FUNCTION__, __LINE__);
+            feedOsfd();
+            ///printf("done\n");
 
-         // trigger event pipe
-         ///printf("%s.%s.%d, trigger Sent...", __FILE__, __FUNCTION__, __LINE__);
-         feedOsfd();
-         ///printf("done\n");
+            // acknowledge any waiting epolls to read
+            s_UDTUnited.m_EPoll.update_events(m_SocketID, m_sPollID, UDT_EPOLL_IN, true);
       }
       else if (ack == m_iRcvLastAck)
       {
@@ -2597,41 +2597,41 @@ void CUDT::processCtrl(CPacket& ctrlpkt)
             SetEvent(m_SendBlockCond);
       #endif
 
-      // acknowledge any waiting epolls to write
-      s_UDTUnited.m_EPoll.update_events(m_SocketID, m_sPollID, UDT_EPOLL_OUT, true);
+         // trigger event pipe
+         ///printf("%s.%s.%d, trigger Ack...", __FILE__, __FUNCTION__, __LINE__);
+         feedOsfd();
+         ///printf("done\n");
 
-      // insert this socket to snd list if it is not on the list yet
-      // notes: if it's high priority socket, then reschedule it immediately
-      if (m_iQos)
-   	   m_pSndQueue->m_pSndUList->update(this);
-      else
-   	   m_pSndQueue->m_pSndUList->update(this, false);
+         // acknowledge any waiting epolls to write
+         s_UDTUnited.m_EPoll.update_events(m_SocketID, m_sPollID, UDT_EPOLL_OUT, true);
 
-      // trigger event pipe
-      ///printf("%s.%s.%d, trigger Ack...", __FILE__, __FUNCTION__, __LINE__);
-      feedOsfd();
-      ///printf("done\n");
+         // insert this socket to snd list if it is not on the list yet
+         // notes: if it's high priority socket, then reschedule it immediately
+         if (m_iQos)
+             m_pSndQueue->m_pSndUList->update(this);
+         else
+             m_pSndQueue->m_pSndUList->update(this, false);
 
-      // Update RTT
-      //m_iRTT = *((int32_t *)ctrlpkt.m_pcData + 1);
-      //m_iRTTVar = *((int32_t *)ctrlpkt.m_pcData + 2);
-      int rtt = *((int32_t *)ctrlpkt.m_pcData + 1);
-      m_iRTTVar = (m_iRTTVar * 3 + abs(rtt - m_iRTT)) >> 2;
-      m_iRTT = (m_iRTT * 7 + rtt) >> 3;
+         // Update RTT
+         //m_iRTT = *((int32_t *)ctrlpkt.m_pcData + 1);
+         //m_iRTTVar = *((int32_t *)ctrlpkt.m_pcData + 2);
+         int rtt = *((int32_t *)ctrlpkt.m_pcData + 1);
+         m_iRTTVar = (m_iRTTVar * 3 + abs(rtt - m_iRTT)) >> 2;
+         m_iRTT = (m_iRTT * 7 + rtt) >> 3;
 
-      m_pCC->setRTT(m_iRTT);
+         m_pCC->setRTT(m_iRTT);
 
-      if (ctrlpkt.getLength() > 16)
-      {
-         // Update Estimated Bandwidth and packet delivery rate
-         if (*((int32_t *)ctrlpkt.m_pcData + 4) > 0)
-            m_iDeliveryRate = (m_iDeliveryRate * 7 + *((int32_t *)ctrlpkt.m_pcData + 4)) >> 3;
+         if (ctrlpkt.getLength() > 16)
+         {
+             // Update Estimated Bandwidth and packet delivery rate
+             if (*((int32_t *)ctrlpkt.m_pcData + 4) > 0)
+                 m_iDeliveryRate = (m_iDeliveryRate * 7 + *((int32_t *)ctrlpkt.m_pcData + 4)) >> 3;
 
-         if (*((int32_t *)ctrlpkt.m_pcData + 5) > 0)
-            m_iBandwidth = (m_iBandwidth * 7 + *((int32_t *)ctrlpkt.m_pcData + 5)) >> 3;
+             if (*((int32_t *)ctrlpkt.m_pcData + 5) > 0)
+                 m_iBandwidth = (m_iBandwidth * 7 + *((int32_t *)ctrlpkt.m_pcData + 5)) >> 3;
 
-         m_pCC->setRcvRate(m_iDeliveryRate);
-         m_pCC->setBandwidth(m_iBandwidth);
+             m_pCC->setRcvRate(m_iDeliveryRate);
+             m_pCC->setBandwidth(m_iBandwidth);
       }
 
       m_pCC->onACK(ack);
@@ -2784,13 +2784,13 @@ void CUDT::processCtrl(CPacket& ctrlpkt)
       releaseSynch();
       ///printf("%s.%s.%d\n", __FILE__, __FUNCTION__, __LINE__);
 
-      CTimer::triggerEvent();
-
       // trigger event pipe
       // TBD... verify if need to disable it to avoid error event deadlock, when close socket
       ///printf("%s.%s.%d, trigger Shutdown...\n", __FILE__, __FUNCTION__, __LINE__);
       feedOsfd();
       ///printf("done\n");
+
+      CTimer::triggerEvent();
 
       break;
 
@@ -3132,13 +3132,13 @@ int CUDT::listen(sockaddr* addr, CPacket& packet)
          }
          else
          {
-            // a new connection has been created, enable epoll for write 
-            s_UDTUnited.m_EPoll.update_events(m_SocketID, m_sPollID, UDT_EPOLL_OUT, true);
-
             // trigger event pipe
             ///printf("%s.%s.%d, trigger Listened...", __FILE__, __FUNCTION__, __LINE__);
             feedOsfd();
             ///printf("done\n");
+
+            // a new connection has been created, enable epoll for write 
+            s_UDTUnited.m_EPoll.update_events(m_SocketID, m_sPollID, UDT_EPOLL_OUT, true);
          }
       }
    }
@@ -3222,15 +3222,15 @@ void CUDT::checkTimers()
 
          releaseSynch();
 
-         // app can call any UDT API to learn the connection_broken error
-         s_UDTUnited.m_EPoll.update_events(m_SocketID, m_sPollID, UDT_EPOLL_IN | UDT_EPOLL_OUT | UDT_EPOLL_ERR, true);
-
-         CTimer::triggerEvent();
-
          // trigger event pipe right here
          ///printf("%s.%s.%d, trigger Broken...", __FILE__, __FUNCTION__, __LINE__);
          feedOsfd();
          ///printf("done\n");
+
+         // app can call any UDT API to learn the connection_broken error
+         s_UDTUnited.m_EPoll.update_events(m_SocketID, m_sPollID, UDT_EPOLL_IN | UDT_EPOLL_OUT | UDT_EPOLL_ERR, true);
+
+         CTimer::triggerEvent();
 
          return;
       }
@@ -3269,15 +3269,15 @@ void CUDT::checkTimers()
 	// check available recv/send/listening event every timers
 	// notes: timer is 10ms by now
 	if ((m_bConnected && (((m_pRcvBuffer->getRcvDataSize() > 0) && (m_iSockType == UDT_STREAM)) ||
-		              ((m_pRcvBuffer->getRcvMsgNum() > 0) && (m_iSockType == UDT_DGRAM)))) ||
-            (m_bListening && (m_pCUDTSocket->m_pQueuedSockets->size() > 0)))
+       ((m_pRcvBuffer->getRcvMsgNum() > 0) && (m_iSockType == UDT_DGRAM)))) ||
+        (m_bListening && (m_pCUDTSocket->m_pQueuedSockets->size() > 0)))
 	{
             ///printf("%s.%s.%d, trigger recv/listen ...", __FILE__, __FUNCTION__, __LINE__);
             feedOsfd();
             ///printf("done\n");
-	} 
-
-        if (m_bConnected && (m_iSndBufSize > m_pSndBuffer->getCurrBufSize()))
+	}
+    
+    if (m_bConnected && (m_iSndBufSize > m_pSndBuffer->getCurrBufSize()))
 	{
             ///printf("%s.%s.%d, trigger send ...", __FILE__, __FUNCTION__, __LINE__);
             ///feedOsfd();

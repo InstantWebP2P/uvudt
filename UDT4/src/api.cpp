@@ -491,13 +491,13 @@ int CUDTUnited::newConnection(const UDTSOCKET listen, const sockaddr* peer, CHan
    }
    CGuard::leaveCS(ls->m_AcceptLock);
 
+   // trigger event pipe
+   ls->m_pUDT->feedOsfd();
+
    // acknowledge users waiting for new connections on the listening socket
    m_EPoll.update_events(listen, ls->m_pUDT->m_sPollID, UDT_EPOLL_IN, true);
 
    CTimer::triggerEvent();
-
-   // trigger event pipe
-   ls->m_pUDT->feedOsfd();
 
 ERR_ROLLBACK:
    if (error > 0)
@@ -1032,11 +1032,6 @@ int CUDTUnited::close(const UDTSOCKET u)
    m_ClosedSockets.insert(pair<UDTSOCKET, CUDTSocket*>(s->m_SocketID, s));
 
    CTimer::triggerEvent();
-
-   // trigger event pipe to notify closing
-   ///printf("%s.%s.%d, trigger Closing...", __FILE__, __FUNCTION__, __LINE__);
-   ///s->m_pUDT->feedOsfd();
-   ///printf("done\n");
 
    return 0;
 }

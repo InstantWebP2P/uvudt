@@ -5,9 +5,12 @@
 
 #ifndef __UVUDT_H__
 #define __UVUDT_H__
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 #include "uv.h"
-#include "udtqueue.h"
+#include "queue.h"
 
 // request type
 struct uvudt_connect_s;
@@ -26,12 +29,18 @@ typedef void (* uvudt_connection_cb)(struct uvudt_s *server, int status);
 // state flags
 enum uvudt_flags_e
 {
-    UVUDT_FLAG_READABLE = 0x01,
-    UVUDT_FLAG_WRITABLE = 0x02,
-    UVUDT_FLAG_SHUT     = 0x04,
-    UVUDT_FLAG_SHUTTING = 0x08,
-    UVUDT_FLAG_CLOSING  = 0x10,
-    UVUDT_FLAG_CLOSED   = 0x20,
+    UVUDT_FLAG_READABLE  = 0x0001,
+    UVUDT_FLAG_WRITABLE  = 0x0002,
+    UVUDT_FLAG_SHUT      = 0x0004,
+    UVUDT_FLAG_SHUTTING  = 0x0008,
+    UVUDT_FLAG_CLOSING   = 0x0010,
+    UVUDT_FLAG_CLOSED    = 0x0020,
+
+    UVUDT_FLAG_REUSEADDR = 0x0100,
+    UVUDT_FLAG_REUSEABLE = 0x0200,
+    UVUDT_FLAG_RENDEZ    = 0x0400,
+
+    UVUDT_FLAG_IPV6ONLY  = 0x1000,
 };
 
 // uvudt_t
@@ -123,8 +132,8 @@ typedef struct uvudt_write_s uvudt_write_t;
 // Public API
 UV_EXTERN int uvudt_init(uv_loop_t *loop, uvudt_t *handle);
 UV_EXTERN int uvudt_open(uvudt_t *handle, uv_os_sock_t sock);
-UV_EXTERN int uvudt_nodelay(uvudt_t *handle, int enable);
 
+UV_EXTERN int uvudt_nodelay(uvudt_t *handle, int enable);
 UV_EXTERN int uvudt_keepalive(uvudt_t *handle, 
                               int enable, 
                               unsigned int delay);
@@ -135,12 +144,12 @@ UV_EXTERN int uvudt_bind(uvudt_t *handle,
                          int reuseaddr, 
                          int reuseable);
 
-UV_EXTERN int uvudt_getsockname(uvudt_t *handle, 
-                                const struct sockaddr *name, 
-                                int *namelen);
+UV_EXTERN int uvudt_getsockname(const uvudt_t* handle,
+                                struct sockaddr* name,
+                                int* namelen);
 
-UV_EXTERN int uvudt_getpeername(uvudt_t *handle, 
-                                const struct sockaddr *name, 
+UV_EXTERN int uvudt_getpeername(const uvudt_t *handle, 
+                                struct sockaddr *name, 
                                 int *namelen);
 
 UV_EXTERN int uvudt_close(uvudt_t *handle, uv_close_cb close_cb);
@@ -159,7 +168,7 @@ UV_EXTERN int uvudt_shutdown(uvudt_shutdown_t *req,
                              uvudt_t *handle,
                              uvudt_shutdown_cb cb);
 
-UV_EXTERN size_t uvudt_stream_get_write_queue_size(uvudt_t *stream);
+UV_EXTERN size_t uvudt_get_write_queue_size(const uvudt_t *stream);
 
 UV_EXTERN int uvudt_listen(uvudt_t *stream, 
                            int backlog, 
@@ -179,6 +188,13 @@ UV_EXTERN int uvudt_write(uvudt_write_t *req,
                           unsigned int nbufs,
                           uvudt_write_cb cb);
 
+UV_EXTERN int uvudt_write2(uvudt_write_t* req,
+                           uvudt_t* handle,
+                           const uv_buf_t bufs[],
+                           unsigned int nbufs,
+                           uv_stream_t* send_handle, // !!! not used, for compatibility with Node.js
+                           uvudt_write_cb cb);
+
 UV_EXTERN int uvudt_try_write(uvudt_t *handle, 
                               const uv_buf_t bufs[], 
                               unsigned int nbufs);
@@ -187,15 +203,7 @@ UV_EXTERN int uvudt_is_readable(uvudt_t *handle);
 
 UV_EXTERN int uvudt_is_writable(uvudt_t *handle);
 
-UV_EXTERN int uvudt_stream_set_blocking(uvudt_t *handle, int blocking);
-
-UV_EXTERN size_t uvudt_stream_get_write_queue_size(uvudt_t *stream);
-
-UV_EXTERN int uvudt_nodelay(uvudt_t *handle, int enable);
-
-UV_EXTERN int uvudt_keepalive(uvudt_t *handle, 
-                              int enable, 
-                              unsigned int delay);
+UV_EXTERN int uvudt_set_blocking(uvudt_t *handle, int blocking);
 
 // enable/disable UDT socket in rendezvous mode
 UV_EXTERN int uvudt_setrendez(uvudt_t *handle, int enable);
@@ -212,7 +220,7 @@ UV_EXTERN int uvudt_setmbs(uvudt_t *handle,
                            int32_t mudt, 
                            int32_t mudp);
 
-// et UDT socket security mode
+// set UDT socket security mode
 UV_EXTERN int uvudt_setsec(uvudt_t *handle, 
                            int32_t mode, 
                            unsigned char keybuf[], 
@@ -276,4 +284,7 @@ typedef struct uvudt_netperf_s
 
 UV_EXTERN int uvudt_getperf(uvudt_t *handle, uvudt_netperf_t *perf, int clear);
 
+#ifdef __cplusplus
+}
+#endif
 #endif // __UVUDT_H__
