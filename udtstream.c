@@ -11,12 +11,8 @@
 // consume UDT Os fd event
 static void udt_consume_osfd(uv_os_sock_t os_fd)
 {
-	int saved_errno = errno;
 	char dummy;
-
 	recv(os_fd, &dummy, sizeof(dummy), 0);
-
-	errno = saved_errno;
 }
 
 static size_t udt__buf_count(uv_buf_t bufs[], int nbufs)
@@ -160,11 +156,9 @@ void udt__server_io(uv_poll_t *handle, int status, int events) {
 
 			  if (udt_getlasterror_code() == UDT_EASYNCRCV /*errno == EAGAIN || errno == EWOULDBLOCK*/) {
 				  /* No problem. */
-				  ///errno = EAGAIN;
 				  return;
 			  } else if (udt_getlasterror_code() == UDT_ESECFAIL /*errno == ECONNABORTED*/) {
 				  /* ignore */
-				  ///errno = ECONNABORTED;
 				  continue;
 			  } else {
 				  //////udt__set_sys_error(udt->loop, uvudt_translate_udt_error());
@@ -485,11 +479,11 @@ static void udt__read(uvudt_t* stream) {
     		/* Error */
     		int udterr = uvudt_translate_udt_error();
 
-    		if (udterr == EAGAIN) {
+    		if (udterr == UV_EAGAIN) {
     			/* Wait for the next one. */
                 stream->read_cb(stream, 0, &buf);
     			return;
-    		} else if ((udterr == EPIPE) || (udterr == ENOTSOCK)) {
+    		} else if ((udterr == UV_EPIPE) || (udterr == UV_ENOTSOCK)) {
                 // socket broken or invalid socket as EOF
                 stream->read_cb(stream, UV_EOF, &buf);
         		return;
@@ -599,8 +593,8 @@ static void udt__stream_connect(uvudt_t* stream) {
     error = stream->delayed_error;
     stream->delayed_error = 0;
   } else {
-	  /* Normal situation: we need to get the socket error from the kernel. */
-	  assert(stream->udtfd != -1);
+	      /* Normal situation: we need to get the socket error from the kernel. */
+	      assert(stream->udtfd != -1);
       
 		  // notes: check socket state until connect successfully
 		  switch (udt_getsockstate(stream->udtfd)) {
@@ -610,7 +604,7 @@ static void udt__stream_connect(uvudt_t* stream) {
 			  ///udt_consume_osfd(stream->fd);
 			  break;
 		  case UDT_CONNECTING:
-			  error = EINPROGRESS;
+			  error = UV_EALREADY;
 			  break;
 		  default:
 			  error = uvudt_translate_udt_error();
@@ -620,7 +614,7 @@ static void udt__stream_connect(uvudt_t* stream) {
 		  }
   }
 
-  if (error == EINPROGRESS)
+  if (error == UV_EALREADY)
     return;
 
   stream->connect_req = NULL;

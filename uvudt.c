@@ -12,12 +12,12 @@
 // consume UDT Os fd event
 static void udt_consume_osfd(int os_fd)
 {
-    int saved_errno = errno;
+    int saved_errno;
     char dummy;
 
     recv(os_fd, &dummy, sizeof(dummy), 0);
 
-    errno = saved_errno;
+    saved_errno;
 }
 
 // UDT socket api
@@ -152,7 +152,7 @@ int uvudt_bind(
     {
         if (udt_getlasterror_code() == UDT_EBOUNDSOCK)
         {
-            udt->delayed_error = EADDRINUSE;
+            udt->delayed_error = UV_EADDRINUSE;
         }
         else
         {
@@ -202,7 +202,7 @@ extern void udt__stream_io(uv_poll_t *handle, int status, int events);
 		   * wait.
 		   */
             case UDT_ECONNREJ:
-                udt->delayed_error = ECONNREFUSED;
+                udt->delayed_error = UV_ECONNREFUSED;
                 break;
 
             default:
@@ -285,7 +285,7 @@ int uvudt_bindfd(uvudt_t* udt,
   udt->delayed_error = 0;
   if (udt_bind2(udt->udtfd, udpfd) == -1) {
     if (udt_getlasterror_code() == UDT_EBOUNDSOCK) {
-      udt->delayed_error = EADDRINUSE;
+      udt->delayed_error = UV_EADDRINUSE;
     } else {
       goto out;
     }
@@ -512,7 +512,7 @@ int uvudt_getperf(uvudt_t *udt, uvudt_netperf_t *perf, int clear)
     default: return UV_UNKNOWN;
 */
 
-// transfer UDT error code to system errno
+// transfer UDT error code to LIBUV errno
 int uvudt_translate_udt_error()
 {
 #ifdef UDT_DEBUG
@@ -522,40 +522,40 @@ int uvudt_translate_udt_error()
     switch (udt_getlasterror_code())
     {
     case UDT_SUCCESS:
-        return errno = 0;
+        return 0;
 
     case UDT_EFILE:
-        return errno = EIO;
+        return UV_EIO;
 
     case UDT_ERDPERM:
     case UDT_EWRPERM:
-        return errno = EPERM;
+        return UV_EPERM;
 
         //case ENOSYS: return UV_ENOSYS;
 
     case UDT_ESOCKFAIL:
     case UDT_EINVSOCK:
-        return errno = ENOTSOCK;
+      return UV_ENOTSOCK;
 
-        //case ENOENT: return UV_ENOENT;
-        //case EACCES: return UV_EACCES;
-        //case EAFNOSUPPORT: return UV_EAFNOSUPPORT;
-        //case EBADF: return UV_EBADF;
-        //case EPIPE: return UV_EPIPE;
+      // case ENOENT: return UV_ENOENT;
+      // case EACCES: return UV_EACCES;
+      // case EAFNOSUPPORT: return UV_EAFNOSUPPORT;
+      // case EBADF: return UV_EBADF;
+      // case EPIPE: return UV_EPIPE;
 
     case UDT_EASYNCSND:
     case UDT_EASYNCRCV:
-        return errno = EAGAIN;
+      return UV_EAGAIN;
 
     case UDT_ECONNSETUP:
     case UDT_ECONNFAIL:
-        return errno = ECONNRESET;
+      return UV_ECONNRESET;
 
-        //case EFAULT: return UV_EFAULT;
-        //case EMFILE: return UV_EMFILE;
+      // case EFAULT: return UV_EFAULT;
+      // case EMFILE: return UV_EMFILE;
 
     case UDT_ELARGEMSG:
-        return errno = EMSGSIZE;
+      return UV_EMSGSIZE;
 
     //case ENAMETOOLONG: return UV_ENAMETOOLONG;
 
@@ -565,29 +565,29 @@ int uvudt_translate_udt_error()
 
     //case ERROR_BROKEN_PIPE: return UV_EOF;
     case UDT_ECONNLOST:
-        return errno = EPIPE;
+      return UV_EPIPE;
 
-        //case ELOOP: return UV_ELOOP;
+      // case ELOOP: return UV_ELOOP;
 
     case UDT_ECONNREJ:
-        return errno = ECONNREFUSED;
+      return UV_ECONNREFUSED;
 
     case UDT_EBOUNDSOCK:
-        return errno = EADDRINUSE;
+      return UV_EADDRINUSE;
 
     //case EADDRNOTAVAIL: return UV_EADDRNOTAVAIL;
     //case ENOTDIR: return UV_ENOTDIR;
     //case EISDIR: return UV_EISDIR;
     case UDT_ENOCONN:
-        return errno = ENOTCONN;
+      return UV_ENOTCONN;
 
-        //case EEXIST: return UV_EEXIST;
-        //case EHOSTUNREACH: return UV_EHOSTUNREACH;
-        //case EAI_NONAME: return UV_ENOENT;
-        //case ESRCH: return UV_ESRCH;
+      // case EEXIST: return UV_EEXIST;
+      // case EHOSTUNREACH: return UV_EHOSTUNREACH;
+      // case EAI_NONAME: return UV_ENOENT;
+      // case ESRCH: return UV_ESRCH;
 
     case UDT_ETIMEOUT:
-        return errno = ETIMEDOUT;
+      return UV_ETIMEDOUT;
 
     //case EXDEV: return UV_EXDEV;
     //case EBUSY: return UV_EBUSY;
@@ -596,7 +596,7 @@ int uvudt_translate_udt_error()
     //case EROFS: return UV_EROFS;
     //case ENOMEM: return UV_ENOMEM;
     default:
-        return errno = -1;
+        return UV_EIO;
     }
 }
 
