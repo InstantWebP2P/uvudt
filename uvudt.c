@@ -69,7 +69,7 @@ int uvudt_open(uvudt_t* handle, uv_os_sock_t sock) {
 
 
 int uvudt_close(uvudt_t *udt, uv_close_cb close_cb) {
-    int rc = 0;
+    int rc = 0, docb = 0;
     uv_poll_t *poll = (uv_poll_t *)udt;
 
     // set closing flag
@@ -80,7 +80,7 @@ int uvudt_close(uvudt_t *udt, uv_close_cb close_cb) {
     }
     udt->flags |= UVUDT_FLAG_CLOSING;
 
-    if (!uv_is_closing(poll)) {
+    if ((poll->type == UV_POLL) && !uv_is_closing(poll)) {
       // stop uv_poll_t
       if (uv_poll_stop(poll)) {
         rc |= -1;
@@ -88,6 +88,8 @@ int uvudt_close(uvudt_t *udt, uv_close_cb close_cb) {
        }
        // close uv_poll_t
        uv_close(poll, close_cb);
+    } else {
+        docb = close_cb != NULL ? 1 : 0;
     }
 
     // clear pending Os fd event,then close UDT socket
@@ -102,6 +104,9 @@ int uvudt_close(uvudt_t *udt, uv_close_cb close_cb) {
 
     // set closed flag
     udt->flags |=  UVUDT_FLAG_CLOSED;
+
+    // callback immedietely
+    if (docb) close_cb(udt);
 
 out:
     return rc;
