@@ -463,10 +463,12 @@ static void udt__read(uvudt_t* stream) {
         return;
     }
     assert(buf.base != NULL);
-
+    
     assert(stream->udtfd != -1);
 
     // UDT recv
+    // !!! Until no data available or error happened ? No
+    /// while (1)
     {
         nread = udt_recv(stream->udtfd, buf.base, buf.len, 0);
         if (nread <= 0) {
