@@ -9,10 +9,14 @@
 
 
 // consume UDT Os fd event
-static void udt_consume_osfd(uv_os_sock_t os_fd)
+static void udt_consume_osfd(uv_os_sock_t os_fd, int drain)
 {
 	char dummy;
-	recv(os_fd, &dummy, sizeof(dummy), 0);
+    if (drain) {
+        while (recv(os_fd, &dummy, sizeof(dummy), 0) > 0) {};
+    } else {
+        recv(os_fd, &dummy, sizeof(dummy), 0);
+    }
 }
 
 static size_t udt__buf_count(uv_buf_t bufs[], int nbufs)
@@ -140,7 +144,7 @@ void udt__server_io(uv_poll_t *handle, int status, int events) {
     // !!! always consume UDT/OSfd event here
     if (stream->udtfd != -1)
     {
-        udt_consume_osfd(stream->fd);
+        udt_consume_osfd(stream->fd, 0);
     }
 
     if (stream->accepted_udtfd != -1)
@@ -148,10 +152,12 @@ void udt__server_io(uv_poll_t *handle, int status, int events) {
         return;
     }
     
-    while (stream->udtfd != -1) {          
+    while (stream->udtfd != -1) {
 		  udtfd = udt__accept(stream->udtfd);
 
-		  if (udtfd < 0) {
+          ///fprintf(stdout, "func:%s, line:%d, errno: %d, %s\n", __FUNCTION__, __LINE__, udt_getlasterror_code(), udt_getlasterror_desc());
+
+          if (udtfd < 0) {
 			  ///fprintf(stdout, "func:%s, line:%d, errno: %d, %s\n", __FUNCTION__, __LINE__, udt_getlasterror_code(), udt_getlasterror_desc());
 
 			  if (udt_getlasterror_code() == UDT_EASYNCRCV /*errno == EAGAIN || errno == EWOULDBLOCK*/) {
@@ -163,6 +169,11 @@ void udt__server_io(uv_poll_t *handle, int status, int events) {
 			  } else {
 				  //////udt__set_sys_error(udt->loop, uvudt_translate_udt_error());
 				  stream->connection_cb(stream, UV_ECONNREFUSED);
+                  // check UDT socket state
+                  if (UDT_LISTENING != udt_getsockstate(stream->udtfd)) {
+                      ///udt_consume_osfd(stream->fd, 1);
+                      return;
+                  }
 			  }
 		  } else {
 			  stream->accepted_udtfd = udtfd;
@@ -207,7 +218,7 @@ int uvudt_accept(uvudt_t* server, uvudt_t* client) {
         UVUDT_FLAG_READABLE | UVUDT_FLAG_WRITABLE)) {
 	  /* TODO handle error */
       // clear pending Os fd event
-      udt_consume_osfd(streamServer->accepted_fd);
+      udt_consume_osfd(streamServer->accepted_fd, 0);
       udt_close(streamServer->accepted_udtfd);
 
 	  streamServer->accepted_udtfd = -1;
@@ -315,7 +326,8 @@ static void udt__write(uvudt_t* stream) {
   uv_poll_t *poll = (uv_poll_t *)stream;
 
 
-  if ((stream->flags & UVUDT_FLAG_CLOSING)) {
+  if ((stream->flags & UVUDT_FLAG_CLOSING) ||
+      (stream->flags & UVUDT_FLAG_CLOSED)) {
     /* Handle was closed this tick. We've received a stale
      * 'is writable' callback from the event loop, ignore.
      */
@@ -345,7 +357,7 @@ start:
 			  size_t ilen = 0;
 			  while (ilen < iov[it].len) {
 				  int rc = udt_send(stream->udtfd, ((char *)iov[it].base)+ilen, iov[it].len-ilen, 0);
-				  if (rc < 0) {
+				  if (rc <= 0) {
 					  next = 0;
 					  break;
 				  } else  {
@@ -548,9 +560,9 @@ void udt__stream_io(uv_poll_t * handle, int status, int events) {
     // !!! always consume UDT/OSfd event here
     if (stream->udtfd != -1)
     {
-        udt_consume_osfd(stream->fd);
+        udt_consume_osfd(stream->fd, 0);
     }
-    
+
     if (stream->connect_req) {
       udt__stream_connect(stream);
     } else {
