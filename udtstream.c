@@ -257,9 +257,13 @@ static void udt__drain(uvudt_t* stream) {
 
     req = stream->shutdown_req;
     stream->shutdown_req = NULL;
-
+  
+    //!!! close UDT socket anyway
+    udt_close(stream->udtfd); 
+  
     // UDT don't need drain
-    stream->flags |= UVUDT_FLAG_SHUT;
+    stream->flags &= ~UVUDT_FLAG_SHUTTING;
+    stream->flags |=  UVUDT_FLAG_SHUT;
     if (req->cb) {
         req->cb(req, 0);
     }
@@ -467,8 +471,6 @@ static void udt__read(uvudt_t* stream) {
     assert(stream->udtfd != -1);
 
     // UDT recv
-    // !!! Until no data available or error happened ? No
-    /// while (1)
     {
         nread = udt_recv(stream->udtfd, buf.base, buf.len, 0);
         if (nread <= 0) {
@@ -548,10 +550,10 @@ void udt__stream_io(uv_poll_t * handle, int status, int events) {
     {
         udt_consume_osfd(stream->fd);
     }
-
-  if (stream->connect_req) {
+    
+    if (stream->connect_req) {
       udt__stream_connect(stream);
-  } else {
+    } else {
 	  // check UDT event
       int udtev, optlen;
       
@@ -570,7 +572,7 @@ void udt__stream_io(uv_poll_t * handle, int status, int events) {
               udt__write_callbacks(stream);
 		  }
       }
-  }
+    }
 }
 
 
