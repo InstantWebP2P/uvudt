@@ -350,20 +350,68 @@ CUDT::CUDT(const CUDT& ancestor)
    memset(m_pSecKey, 0, sizeof(m_pSecKey));
 }
 
+///////////////////////////////////////////////////////////////////
 // close Osfd pair
-static void _closeOsfd(SYSSOCKET m_evPipe[])
-{
-	// close event pipe
-	///printf("close evPipe fds:%d,%d\n", m_evPipe[0], m_evPipe[1]);
+static void _closeOsfd(SYSSOCKET m_evPipe[]) {
+  // close event pipe
+  // notes: let user close reading Osfd
+  /// printf("close evPipe fds:%d,%d\n", m_evPipe[0], m_evPipe[1]);
 #ifndef WIN32
-	close(m_evPipe[1]);
-	close(m_evPipe[0]);
+  close(m_evPipe[1]);
+  /// close(m_evPipe[0]);
 #else
-	// notes: let user close reading Osfd
-	closesocket(m_evPipe[1]);
-	///closesocket(m_evPipe[0]);
+  closesocket(m_evPipe[1]);
+  /// closesocket(m_evPipe[0]);
 #endif
 }
+
+// feed OS fd to trigger safe edge event
+// Notes: always guarantee only one byte pending
+static int _feedOsfd(const SYSSOCKET m_evPipe[]) {
+  char dummy;
+
+#ifndef WIN32
+// UNIX-like OS
+#ifdef EVPIPE_OSFD_EDGE
+  // trigger edge event
+  recv(m_evPipe[0], &dummy, sizeof(dummy), 0);
+  dummy = 0x68;
+  return send(m_evPipe[1], &dummy, sizeof(dummy), 0);
+#else
+  // trigger level event
+  int nread = -1;
+
+  if ((ioctl(m_evPipe[0], FIONREAD, &nread) == 0) && (nread == 0)) {
+    dummy = 0x68;
+    return send(m_evPipe[1], &dummy, sizeof(dummy), 0);
+  } else {
+    return 0;
+  }
+#endif
+
+#else
+  // WINDOWS
+  // trigger level event on windows
+  unsigned long nread = -1;
+
+  if ((ioctlsocket(m_evPipe[0], FIONREAD, &nread) == 0) && (nread == 0)) {
+    dummy = 0x68;
+    return send(m_evPipe[1], &dummy, sizeof(dummy), 0);
+  } else {
+    return 0;
+  }
+#endif
+}
+
+// retrieve m_evPipe[0] OS fd
+SYSSOCKET CUDT::getOsfd() {
+  return m_evPipe[0];
+}
+
+int CUDT::feedOsfd() {
+  return _feedOsfd(m_evPipe);
+}
+//////////////////////////////////////////////////////////////////////////
 
 CUDT::~CUDT()
 {
@@ -384,63 +432,10 @@ CUDT::~CUDT()
    delete m_pSNode;
    delete m_pRNode;
 
-   // close Osfd
+   // close Osfd with last trigger
+   _feedOsfd(m_evPipe);
    _closeOsfd(m_evPipe);
 }
-
-///////////////////////////////////////////////////////////////////
-// retrieve m_evPipe[0] OS fd
-SYSSOCKET CUDT::getOsfd()
-{
-	return m_evPipe[0];
-}
-
-// feed OS fd to trigger safe edge event
-// Notes: always guarantee only one byte pending
-static int _feedOsfd(const SYSSOCKET m_evPipe[])
-{
-	char dummy;
-
-#ifndef WIN32
-// UNIX-like OS
-#ifdef EVPIPE_OSFD_EDGE
-	// trigger edge event
-	recv(m_evPipe[0], &dummy, sizeof(dummy), 0);
-	dummy = 0x68;
-	return send(m_evPipe[1], &dummy, sizeof(dummy), 0);
-#else
-	// trigger level event
-        int nread = -1;
-
-	if ((ioctl(m_evPipe[0], FIONREAD, &nread) == 0) &&
-		(nread == 0)) {
-		dummy = 0x68;
-		return send(m_evPipe[1], &dummy, sizeof(dummy), 0);
-	} else {
-		return 0;
-	}
-#endif
-
-#else
-// WINDOWS
-	// trigger level event on windows
-	unsigned long nread = -1;
-
-	if ((ioctlsocket(m_evPipe[0], FIONREAD, &nread) == 0) &&
-		(nread == 0)) {
-		dummy = 0x68;
-		return send(m_evPipe[1], &dummy, sizeof(dummy), 0);
-	} else {
-		return 0;
-	}
-#endif
-}
-
-int CUDT::feedOsfd()
-{
-	return _feedOsfd(m_evPipe);
-}
-//////////////////////////////////////////////////////////////////////////
 
 void CUDT::setOpt(UDTOpt optName, const void* optval, int optlen)
 {
@@ -1175,14 +1170,14 @@ POST_CONNECT:
 
    // acknowledge the management module.
    s_UDTUnited.connect_complete(m_SocketID);
+   
+   // acknowledge any waiting epolls to write
+   s_UDTUnited.m_EPoll.update_events(m_SocketID, m_sPollID, UDT_EPOLL_OUT, true);
 
    // trigger event pipe
    ///printf("%s.%s.%d, trigger Connected...", __FILE__, __FUNCTION__, __LINE__);
    feedOsfd();
    ///printf("done\n");
-   
-   // acknowledge any waiting epolls to write
-   s_UDTUnited.m_EPoll.update_events(m_SocketID, m_sPollID, UDT_EPOLL_OUT, true);
 
    return 0;
 }
@@ -1334,13 +1329,14 @@ void CUDT::close()
    if (m_bConnected)
       m_pSndQueue->m_pSndUList->remove(this);
 
+   // trigger any pending IO events.
+   s_UDTUnited.m_EPoll.update_events(m_SocketID, m_sPollID, UDT_EPOLL_ERR, true);
+
    // trigger event pipe to notify closing
    ///printf("%s.%s.%d, trigger Closing...", __FILE__, __FUNCTION__, __LINE__);
    ///feedOsfd();
    ///printf("done\n");
 
-   // trigger any pending IO events.
-   s_UDTUnited.m_EPoll.update_events(m_SocketID, m_sPollID, UDT_EPOLL_ERR, true);
    // then remove itself from all epoll monitoring
    try
    {
@@ -2263,13 +2259,13 @@ void CUDT::sendCtrl(int pkttype, void* lparam, void* rparam, int size)
                SetEvent(m_RecvDataCond);
          #endif
 
+            // acknowledge any waiting epolls to read
+            s_UDTUnited.m_EPoll.update_events(m_SocketID, m_sPollID, UDT_EPOLL_IN, true);
+
             // trigger event pipe
             ///printf("%s.%s.%d, trigger Sent...", __FILE__, __FUNCTION__, __LINE__);
             feedOsfd();
             ///printf("done\n");
-
-            // acknowledge any waiting epolls to read
-            s_UDTUnited.m_EPoll.update_events(m_SocketID, m_sPollID, UDT_EPOLL_IN, true);
       }
       else if (ack == m_iRcvLastAck)
       {
@@ -2597,13 +2593,14 @@ void CUDT::processCtrl(CPacket& ctrlpkt)
             SetEvent(m_SendBlockCond);
       #endif
 
-         // trigger event pipe
-         ///printf("%s.%s.%d, trigger Ack...", __FILE__, __FUNCTION__, __LINE__);
-         feedOsfd();
-         ///printf("done\n");
-
          // acknowledge any waiting epolls to write
          s_UDTUnited.m_EPoll.update_events(m_SocketID, m_sPollID, UDT_EPOLL_OUT, true);
+
+         // trigger event pipe
+         /// printf("%s.%s.%d, trigger Ack...", __FILE__, __FUNCTION__,
+         /// __LINE__);
+         feedOsfd();
+         /// printf("done\n");
 
          // insert this socket to snd list if it is not on the list yet
          // notes: if it's high priority socket, then reschedule it immediately
@@ -2784,13 +2781,15 @@ void CUDT::processCtrl(CPacket& ctrlpkt)
       releaseSynch();
       ///printf("%s.%s.%d\n", __FILE__, __FUNCTION__, __LINE__);
 
-      // trigger event pipe
-      // TBD... verify if need to disable it to avoid error event deadlock, when close socket
-      ///printf("%s.%s.%d, trigger Shutdown...\n", __FILE__, __FUNCTION__, __LINE__);
-      feedOsfd();
-      ///printf("done\n");
-
       CTimer::triggerEvent();
+
+      // trigger event pipe
+      // TBD... verify if need to disable it to avoid error event deadlock, when
+      // close socket
+      /// printf("%s.%s.%d, trigger Shutdown...\n", __FILE__, __FUNCTION__,
+      /// __LINE__);
+      feedOsfd();
+      /// printf("done\n");
 
       break;
 
@@ -3132,13 +3131,14 @@ int CUDT::listen(sockaddr* addr, CPacket& packet)
          }
          else
          {
-            // trigger event pipe
-            ///printf("%s.%s.%d, trigger Listened...", __FILE__, __FUNCTION__, __LINE__);
-            feedOsfd();
-            ///printf("done\n");
-
             // a new connection has been created, enable epoll for write 
             s_UDTUnited.m_EPoll.update_events(m_SocketID, m_sPollID, UDT_EPOLL_OUT, true);
+
+            // trigger event pipe
+            /// printf("%s.%s.%d, trigger Listened...", __FILE__, __FUNCTION__,
+            /// __LINE__);
+            feedOsfd();
+            /// printf("done\n");
          }
       }
    }
@@ -3222,15 +3222,16 @@ void CUDT::checkTimers()
 
          releaseSynch();
 
-         // trigger event pipe right here
-         ///printf("%s.%s.%d, trigger Broken...", __FILE__, __FUNCTION__, __LINE__);
-         feedOsfd();
-         ///printf("done\n");
-
          // app can call any UDT API to learn the connection_broken error
          s_UDTUnited.m_EPoll.update_events(m_SocketID, m_sPollID, UDT_EPOLL_IN | UDT_EPOLL_OUT | UDT_EPOLL_ERR, true);
 
          CTimer::triggerEvent();
+
+         // trigger event pipe right here
+         /// printf("%s.%s.%d, trigger Broken...", __FILE__, __FUNCTION__,
+         /// __LINE__);
+         feedOsfd();
+         /// printf("done\n");
 
          return;
       }

@@ -491,13 +491,13 @@ int CUDTUnited::newConnection(const UDTSOCKET listen, const sockaddr* peer, CHan
    }
    CGuard::leaveCS(ls->m_AcceptLock);
 
-   // trigger event pipe
-   ls->m_pUDT->feedOsfd();
-
    // acknowledge users waiting for new connections on the listening socket
    m_EPoll.update_events(listen, ls->m_pUDT->m_sPollID, UDT_EPOLL_IN, true);
 
    CTimer::triggerEvent();
+
+   // trigger event pipe
+   ls->m_pUDT->feedOsfd();
 
 ERR_ROLLBACK:
    if (error > 0)

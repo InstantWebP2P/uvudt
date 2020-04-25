@@ -271,7 +271,7 @@ typedef struct UDT_CPerfMon_ {
    int pktRecvACKTotal;                 // total number of received ACK packets
    int pktSentNAKTotal;                 // total number of sent NAK packets
    int pktRecvNAKTotal;                 // total number of received NAK packets
-   int64_t usSndDurationTotal;		     // total time duration when UDT is sending data (idle time exclusive)
+   int64_t usSndDurationTotal;		    // total time duration when UDT is sending data (idle time exclusive)
 
    // local measurements
    int64_t pktSent;                     // number of sent data packets, including retransmissions

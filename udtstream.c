@@ -9,14 +9,10 @@
 
 
 // consume UDT Os fd event
-static void udt_consume_osfd(uv_os_sock_t os_fd, int drain)
+static void udt_consume_osfd(uv_os_sock_t os_fd)
 {
 	char dummy;
-    if (drain) {
-        while (recv(os_fd, &dummy, sizeof(dummy), 0) > 0) {};
-    } else {
-        recv(os_fd, &dummy, sizeof(dummy), 0);
-    }
+    recv(os_fd, &dummy, sizeof(dummy), 0);
 }
 
 static size_t udt__buf_count(uv_buf_t bufs[], int nbufs)
@@ -142,10 +138,7 @@ void udt__server_io(uv_poll_t *handle, int status, int events) {
     assert(!(stream->flags & UVUDT_FLAG_CLOSING));
 
     // !!! always consume UDT/OSfd event here
-    if (stream->udtfd != -1)
-    {
-        udt_consume_osfd(stream->fd, 0);
-    }
+    udt_consume_osfd(stream->fd);
 
     if (stream->accepted_udtfd != -1)
     {
@@ -171,7 +164,7 @@ void udt__server_io(uv_poll_t *handle, int status, int events) {
 				  stream->connection_cb(stream, UV_ECONNREFUSED);
                   // check UDT socket state
                   if (UDT_LISTENING != udt_getsockstate(stream->udtfd)) {
-                      ///udt_consume_osfd(stream->fd, 1);
+                      ///udt_consume_osfd(stream->fd);
                       return;
                   }
 			  }
@@ -218,7 +211,7 @@ int uvudt_accept(uvudt_t* server, uvudt_t* client) {
         UVUDT_FLAG_READABLE | UVUDT_FLAG_WRITABLE)) {
 	  /* TODO handle error */
       // clear pending Os fd event
-      udt_consume_osfd(streamServer->accepted_fd, 0);
+      udt_consume_osfd(streamServer->accepted_fd);
       udt_close(streamServer->accepted_udtfd);
 
 	  streamServer->accepted_udtfd = -1;
@@ -558,10 +551,7 @@ void udt__stream_io(uv_poll_t * handle, int status, int events) {
     assert(stream->udtfd != -1);
 
     // !!! always consume UDT/OSfd event here
-    if (stream->udtfd != -1)
-    {
-        udt_consume_osfd(stream->fd, 0);
-    }
+    udt_consume_osfd(stream->fd);
 
     if (stream->connect_req) {
       udt__stream_connect(stream);
