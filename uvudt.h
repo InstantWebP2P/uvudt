@@ -161,8 +161,8 @@ UV_EXTERN int uvudt_connect(uvudt_connect_t *req,
 
 UV_EXTERN int uvudt_punchhole(uvudt_t *handle, 
                               const struct sockaddr *addr, 
-                              int32_t from, 
-                              int32_t to);
+                              int from, 
+                              int to);
 
 UV_EXTERN int uvudt_shutdown(uvudt_shutdown_t *req,
                              uvudt_t *handle,
@@ -216,15 +216,15 @@ UV_EXTERN int uvudt_setmbw(uvudt_t *handle, int64_t mbw);
 
 // set UDT socket maxim buffer size
 UV_EXTERN int uvudt_setmbs(uvudt_t *handle, 
-                           int32_t mfc, 
-                           int32_t mudt, 
-                           int32_t mudp);
+                           int mfc, 
+                           int mudt, 
+                           int mudp);
 
 // set UDT socket security mode
 UV_EXTERN int uvudt_setsec(uvudt_t *handle, 
-                           int32_t mode, 
+                           int mode, 
                            unsigned char keybuf[], 
-                           int32_t keylen);
+                           int keylen);
 
 // binding udt socket on existing udp socket/fd
 UV_EXTERN int uvudt_bindfd(uvudt_t *handle, 
@@ -236,10 +236,10 @@ UV_EXTERN int uvudt_bindfd(uvudt_t *handle,
 UV_EXTERN int uvudt_udpfd(uvudt_t *handle, uv_os_sock_t *udpfd);
 
 // set if REUSE existing ADDRESS created by previous udt socket
-UV_EXTERN int uvudt_reuseaddr(uvudt_t *handle, int32_t yes);
+UV_EXTERN int uvudt_reuseaddr(uvudt_t *handle, int yes);
 
 // set if ADDRESS reusable for another udt socket
-UV_EXTERN int uvudt_reuseable(uvudt_t *handle, int32_t yes);
+UV_EXTERN int uvudt_reuseable(uvudt_t *handle, int yes);
 
 // UDT network performance track
 typedef struct uvudt_netperf_s

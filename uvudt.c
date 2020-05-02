@@ -422,7 +422,7 @@ int uvudt_setmbw(uvudt_t *udt, int64_t mbw)
     return 0;
 }
 
-int uvudt_setmbs(uvudt_t *udt, int32_t mfc, int32_t mudt, int32_t mudp)
+int uvudt_setmbs(uvudt_t *udt, int mfc, int mudt, int mudp)
 {
     if (udt->udtfd != -1 &&
         ((mfc  != -1 ? udt_setsockopt(udt->udtfd, 0, UDT_UDT_FC,     &mfc, sizeof(mfc))   : 0) ||
@@ -435,7 +435,7 @@ int uvudt_setmbs(uvudt_t *udt, int32_t mfc, int32_t mudt, int32_t mudp)
     return 0;
 }
 
-int uvudt_setsec(uvudt_t *udt, int32_t mode, unsigned char key_buf[], int32_t key_len)
+int uvudt_setsec(uvudt_t *udt, int mode, unsigned char key_buf[], int key_len)
 {
     if (udt->udtfd != -1 &&
        (udt_setsockopt(udt->udtfd, 0, UDT_UDT_SECKEY, key_buf, (32 < key_len) ? 32 : key_len)) ||
@@ -445,7 +445,7 @@ int uvudt_setsec(uvudt_t *udt, int32_t mode, unsigned char key_buf[], int32_t ke
     return 0;
 }
 
-int uvudt_punchhole(uvudt_t *udt, const struct sockaddr * addr, int32_t from, int32_t to)
+int uvudt_punchhole(uvudt_t *udt, const struct sockaddr * addr, int from, int to)
 {
     assert(addr != NULL);
     socklen_t addrlen = (addr->sa_family == AF_INET6) ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in);
@@ -711,14 +711,14 @@ int uvudt_udpfd(uvudt_t* handle, uv_os_sock_t* udpfd) {
   return udt_getsockopt(handle->udtfd, 0, (int)UDT_UDT_UDPFD, udpfd, &optlen);
 }
 
-int uvudt_reuseaddr(uvudt_t* handle, int32_t yes) {
+int uvudt_reuseaddr(uvudt_t* handle, int yes) {
   int optval = yes;
 
   return udt_setsockopt(
       handle->udtfd, 0, (int)UDT_UDT_REUSEADDR, &optval, sizeof optval);
 }
 
-int uvudt_reuseable(uvudt_t* handle, int32_t yes) {
+int uvudt_reuseable(uvudt_t* handle, int yes) {
   int optval = yes;
 
   return udt_setsockopt(
