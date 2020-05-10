@@ -248,7 +248,7 @@ void CChannel::setUDPSockOpt()
     // A small time out value will cause the socket to block forever.
     tv.tv_usec = 500; // 10ms -> 10us -> 500us
 #else
-    tv.tv_usec = 10; // 100us -> 10ms -> 100us -> 10us
+    tv.tv_usec = 100; // 100us -> 10ms -> 100us -> 10us -> 100us
 #endif
 
 #ifdef UNIX
