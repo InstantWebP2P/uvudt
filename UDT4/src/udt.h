@@ -47,13 +47,12 @@ written by
    #include <sys/socket.h>
    #include <netinet/in.h>
 #else
+   #include <winsock2.h>
    #ifdef __MINGW__
       #include <stdint.h>
       #include <ws2tcpip.h>
    #endif
    #include <windows.h>
-   #include <winsock2.h>
-
 #ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0600
 #endif
