@@ -515,7 +515,7 @@ void CSndQueue::init(CChannel* c, CTimer* t)
        throw CUDTException(3, 1);
        // adjust thread priority
        ///assert(SetThreadPriority(m_WorkerThread, THREAD_PRIORITY_BELOW_NORMAL/*THREAD_PRIORITY_ABOVE_NORMAL*/));
-   SetThreadDescription(m_WorkerThread, L"UDT.CSndQueue");
+   ///SetThreadDescription(m_WorkerThread, L"UDT.CSndQueue");
 #endif
 }
 
@@ -988,7 +988,7 @@ void CRcvQueue::init(int qsize, int payload, int version, int hsize, CChannel* c
         throw CUDTException(3, 1);
     // adjust thread priority
     ///assert(SetThreadPriority(m_WorkerThread, THREAD_PRIORITY_BELOW_NORMAL/*THREAD_PRIORITY_ABOVE_NORMAL*/));
-    SetThreadDescription(m_WorkerThread, L"UDT.CRcvQueue");
+    ///SetThreadDescription(m_WorkerThread, L"UDT.CRcvQueue");
 #endif
 }
 
