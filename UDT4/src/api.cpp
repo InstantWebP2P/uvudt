@@ -248,7 +248,7 @@ int CUDTUnited::startup()
    // adjust thread priority
    ///assert(SetThreadPriority(m_GCThread, THREAD_PRIORITY_ABOVE_NORMAL));
 
-   SetThreadName(threadID, "UDT.GC");
+   SetThreadDescription(m_GCThread, L"UDT.GC");
    #endif
 
       ///////////////////////////////////

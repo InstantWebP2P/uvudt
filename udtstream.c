@@ -446,9 +446,6 @@ static void udt__write_callbacks(uvudt_t* stream) {
 static void udt__read(uvudt_t* stream) {
   uv_buf_t buf;
   ssize_t nread;
-  struct msghdr msg;
-  struct cmsghdr* cmsg;
-  char cmsg_space[64];
   int count;
   uv_poll_t *poll = (uv_poll_t *)stream;
 

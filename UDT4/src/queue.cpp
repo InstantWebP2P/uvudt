@@ -515,7 +515,7 @@ void CSndQueue::init(CChannel* c, CTimer* t)
        throw CUDTException(3, 1);
        // adjust thread priority
        ///assert(SetThreadPriority(m_WorkerThread, THREAD_PRIORITY_BELOW_NORMAL/*THREAD_PRIORITY_ABOVE_NORMAL*/));
-   SetThreadName(threadID, "UDT.CSndQueue");
+   SetThreadDescription(m_WorkerThread, L"UDT.CSndQueue");
 #endif
 }
 
@@ -988,7 +988,7 @@ void CRcvQueue::init(int qsize, int payload, int version, int hsize, CChannel* c
         throw CUDTException(3, 1);
     // adjust thread priority
     ///assert(SetThreadPriority(m_WorkerThread, THREAD_PRIORITY_BELOW_NORMAL/*THREAD_PRIORITY_ABOVE_NORMAL*/));
-    SetThreadName(threadID, "UDT.CRcvQueue");
+    SetThreadDescription(m_WorkerThread, L"UDT.CRcvQueue");
 #endif
 }
 
@@ -1032,10 +1032,13 @@ void CRcvQueue::init(int qsize, int payload, int version, int hsize, CChannel* c
             ///printf("%s.%s.%d, no space...\n", __FILE__, __FUNCTION__, __LINE__);
             // no space, skip this packet
             CPacket temp;
-            char temp_pc[self->m_iPayloadSize];
+            char * temp_pc = (char *)malloc(self->m_iPayloadSize);
+
             temp.m_pcData = temp_pc;
             temp.setLength(self->m_iPayloadSize);
             self->m_pChannel->recvfrom(addr, temp);
+            free(temp_pc);
+
             goto TIMER_CHECK;
         }
 
