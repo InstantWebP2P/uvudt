@@ -15,7 +15,7 @@ static void udt_consume_osfd(uv_os_sock_t os_fd)
     recv(os_fd, &dummy, sizeof(dummy), 0);
 }
 
-static size_t udt__buf_count(uv_buf_t bufs[], int nbufs)
+static size_t udt__buf_count(const uv_buf_t bufs[], int nbufs)
 {
     size_t total = 0;
     int i;
@@ -326,8 +326,6 @@ static void udt__write(uvudt_t* stream) {
      */
     return;
   }
-
-start:
 
   assert(stream->udtfd != -1);
 
