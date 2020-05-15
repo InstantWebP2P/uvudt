@@ -1660,7 +1660,7 @@ void CUDTUnited::updateMux(CUDTSocket* s, const CUDTSocket* ls)
    ///printf("UDT id: %d, reuseaddr: %d\n", s->m_SocketID, s->m_pUDT->m_bReuseAddr);
 #endif
 
-   int port = (AF_INET == ls->m_iIPversion) ? ntohs(((sockaddr_in*)ls->m_pSelfAddr)->sin_port) : ntohs(((sockaddr_in6*)ls->m_pSelfAddr)->sin6_port);
+   //int port = (AF_INET == ls->m_iIPversion) ? ntohs(((sockaddr_in*)ls->m_pSelfAddr)->sin_port) : ntohs(((sockaddr_in6*)ls->m_pSelfAddr)->sin6_port);
 
    // find the listener's Mux by ID
    map<int, CMultiplexer>::iterator me = m_mMultiplexer.find(ls->m_iMuxID);

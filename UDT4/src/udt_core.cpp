@@ -599,7 +599,7 @@ void CUDT::setOpt(UDTOpt optName, const void* optval, int optlen)
       break;
 
    case UDT_SECKEY:
-	  memcpy(m_pSecKey, optval, (optlen < sizeof(m_pSecKey)) ? optlen : sizeof(m_pSecKey));
+	  memcpy(m_pSecKey, optval, ((unsigned int)optlen < sizeof(m_pSecKey)) ? optlen : sizeof(m_pSecKey));
       break;
 
    case UDT_REUSEABLE:

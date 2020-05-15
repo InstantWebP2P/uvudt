@@ -12,12 +12,8 @@
 // consume UDT Os fd event
 static void udt_consume_osfd(int os_fd)
 {
-    int saved_errno;
     char dummy;
-
     recv(os_fd, &dummy, sizeof(dummy), 0);
-
-    saved_errno;
 }
 
 // UDT socket api
@@ -80,14 +76,14 @@ int uvudt_close(uvudt_t *udt, uv_close_cb close_cb) {
     }
     udt->flags |= UVUDT_FLAG_CLOSING;
 
-    if ((poll->type == UV_POLL) && !uv_is_closing(poll)) {
+    if ((poll->type == UV_POLL) && !uv_is_closing((uv_handle_t *)poll)) {
       // stop uv_poll_t
       if (uv_poll_stop(poll)) {
         rc |= -1;
         goto out;
        }
        // close uv_poll_t
-       uv_close(poll, close_cb);
+       uv_close((uv_handle_t *)poll, close_cb);
     } else {
         docb = close_cb != NULL ? 1 : 0;
     }
@@ -106,7 +102,7 @@ int uvudt_close(uvudt_t *udt, uv_close_cb close_cb) {
     udt->flags |=  UVUDT_FLAG_CLOSED;
 
     // callback immedietely
-    if (docb) close_cb(udt);
+    if (docb) close_cb((uv_handle_t *)udt);
 
 out:
     return rc;
@@ -424,7 +420,7 @@ int uvudt_setmbw(uvudt_t *udt, int64_t mbw)
 
 int uvudt_setmbs(uvudt_t *udt, int mfc, int mudt, int mudp)
 {
-    if (udt->udtfd != -1 &&
+    if ( (udt->udtfd != -1) &&
         ((mfc  != -1 ? udt_setsockopt(udt->udtfd, 0, UDT_UDT_FC,     &mfc, sizeof(mfc))   : 0) ||
          (mudt != -1 ? udt_setsockopt(udt->udtfd, 0, UDT_UDT_SNDBUF, &mudt, sizeof(mudt)) : 0) ||
          (mudt != -1 ? udt_setsockopt(udt->udtfd, 0, UDT_UDT_RCVBUF, &mudt, sizeof(mudt)) : 0) ||
@@ -437,9 +433,9 @@ int uvudt_setmbs(uvudt_t *udt, int mfc, int mudt, int mudp)
 
 int uvudt_setsec(uvudt_t *udt, int mode, unsigned char key_buf[], int key_len)
 {
-    if (udt->udtfd != -1 &&
-       (udt_setsockopt(udt->udtfd, 0, UDT_UDT_SECKEY, key_buf, (32 < key_len) ? 32 : key_len)) ||
-        udt_setsockopt(udt->udtfd, 0, UDT_UDT_SECMOD, &mode, sizeof(mode)))
+    if ((udt->udtfd != -1) &&
+        (udt_setsockopt(udt->udtfd, 0, UDT_UDT_SECKEY, key_buf, (32 < key_len) ? 32 : key_len) ||
+         udt_setsockopt(udt->udtfd, 0, UDT_UDT_SECMOD, &mode, sizeof(mode))))
         return -1;
 
     return 0;

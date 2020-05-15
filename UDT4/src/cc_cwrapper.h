@@ -33,7 +33,7 @@ public:
       setRTO(1000000);
    }
 
-   virtual void onACK(const int& ack)
+   virtual void onACK(int32_t ack)
    {
       if (ack == m_iLastACK)
       {
