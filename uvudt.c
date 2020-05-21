@@ -3,11 +3,14 @@
 // Copyright 2020, tom zhou<appnet.link@gmail.com>
 //////////////////////////////////////////////////////
 
+#include <stdlib.h>
+#include <assert.h>
 #include "udtc.h"
 #include "uvudt.h"
-#include <assert.h>
 
 //#define UDT_DEBUG 1
+
+static int udt__socket(int domain, int type, int protocol);
 
 // consume UDT Os fd event
 static void udt_consume_osfd(int os_fd)
@@ -602,7 +605,7 @@ int uvudt_translate_udt_error()
 }
 
 // UDT socket operation
-int udt__socket(int domain, int type, int protocol)
+static int udt__socket(int domain, int type, int protocol)
 {
     int udtfd;
     int optval;

@@ -3,9 +3,10 @@
 // Copyright 2020, tom zhou<appnet.link@gmail.com>
 //////////////////////////////////////////////////////
 
+#include <stdlib.h>
+#include <assert.h>
 #include "udtc.h"
 #include "uvudt.h"
-#include <assert.h>
 
 
 // consume UDT Os fd event
@@ -803,7 +804,7 @@ int uvudt_is_writable(uvudt_t* stream) {
 
 
 int uvudt_set_blocking(uvudt_t* handle, int blocking) {
-    return udt__nonblock(!blocking);
+    return udt__nonblock(handle, !blocking);
 }
 
 
