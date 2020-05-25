@@ -111,14 +111,12 @@ out:
     return rc;
 }
 
-int uvudt_bind(
-        uvudt_t *udt,
-        const struct sockaddr *addr,
-        int reuseaddr,
-        int reuseable)
+int uvudt_bind(uvudt_t *udt,
+               const struct sockaddr *addr,
+               int reuseaddr,
+               int reuseable)
 {
     int status;
-    int optlen;
     int domain;
     int addrsize;
     

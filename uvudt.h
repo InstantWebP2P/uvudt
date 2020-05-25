@@ -285,7 +285,7 @@ typedef struct uvudt_netperf_s
 UV_EXTERN int uvudt_getperf(uvudt_t *handle, uvudt_netperf_t *perf, int clear);
 
 // internal api
-UV_EXTERN int  uvudt_translate_udt_error();
+UV_EXTERN int  uvudt_translate_udt_error(void);
 UV_EXTERN int  udt__nonblock(int udtfd, int set);
 UV_EXTERN int  udt__accept(int udtfd);
 UV_EXTERN void udt__stream_init(uv_loop_t* loop, uvudt_t* stream);

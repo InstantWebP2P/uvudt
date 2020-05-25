@@ -13,7 +13,6 @@ typedef struct {
 
 static uv_loop_t* loop;
 
-static int server_closed;
 static uvudt_t udtServer;
 static uvudt_t *server;
 static uvudt_t udt6Server;
@@ -22,7 +21,6 @@ static uvudt_t *server6;
 static void after_write(uvudt_write_t* req, int status);
 static void after_read(uvudt_t*, ssize_t nread, const uv_buf_t* buf);
 static void on_close(uv_handle_t* peer);
-static void on_server_close(uv_handle_t* handle);
 static void on_connection(uvudt_t*, int status);
 
 
@@ -53,7 +51,6 @@ static void after_shutdown(uvudt_shutdown_t* req, int status) {
 static void after_read(uvudt_t* handle,
                        ssize_t nread,
                        const uv_buf_t* buf) {
-  int i;
   write_req_t *wr;
   uvudt_shutdown_t* sreq;
 
@@ -95,14 +92,6 @@ static void echo_alloc(uv_handle_t* handle,
   buf->len = suggested_size;
 }
 
-static void slab_alloc(uv_handle_t* handle,
-                       size_t suggested_size,
-                       uv_buf_t* buf) {
-  /* up to 16 datagrams at once */
-  static char slab[16 * 64 * 1024];
-  buf->base = slab;
-  buf->len = sizeof(slab);
-}
 
 static void on_connection(uvudt_t* server, int status) {
   uvudt_t* stream;
@@ -129,10 +118,6 @@ static void on_connection(uvudt_t* server, int status) {
   assert(r == 0);
 }
 
-
-static void on_server_close(uv_handle_t* handle) {
-  assert(handle == server);
-}
 
 static int udt4_echo_start(int port) {
   struct sockaddr_in addr;

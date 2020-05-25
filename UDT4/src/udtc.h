@@ -121,8 +121,8 @@ UDT_API extern const UDTSOCKET INVALID_SOCK;
 #undef ERROR
 UDT_API extern const int ERROR;
 
-UDT_API int startup();
-UDT_API int cleanup();
+UDT_API int startup(void);
+UDT_API int cleanup(void);
 UDT_API UDTSOCKET socket(int af, int type, int protocol);
 UDT_API int bind(UDTSOCKET u, const struct sockaddr* name, int namelen);
 UDT_API int bind2(UDTSOCKET u, UDPSOCKET udpsock);
@@ -148,7 +148,7 @@ UDT_API int select(int nfds, UDSET* readfds, UDSET* writefds, UDSET* exceptfds, 
 UDT_API int selectEx(const std::vector<UDTSOCKET>& fds, std::vector<UDTSOCKET>* readfds,
                      std::vector<UDTSOCKET>* writefds, std::vector<UDTSOCKET>* exceptfds, int64_t msTimeOut);
 
-UDT_API int epoll_create();
+UDT_API int epoll_create(void);
 UDT_API int epoll_add_usock(int eid, UDTSOCKET u, const int* events = NULL);
 UDT_API int epoll_add_ssock(int eid, SYSSOCKET s, const int* events = NULL);
 UDT_API int epoll_remove_usock(int eid, UDTSOCKET u);
@@ -158,9 +158,9 @@ UDT_API int epoll_wait(int eid, std::set<UDTSOCKET>* readfds, std::set<UDTSOCKET
 UDT_API int epoll_wait2(int eid, UDTSOCKET* readfds, int* rnum, UDTSOCKET* writefds, int* wnum, int64_t msTimeOut,
                         SYSSOCKET* lrfds = NULL, int* lrnum = NULL, SYSSOCKET* lwfds = NULL, int* lwnum = NULL);
 UDT_API int epoll_release(int eid);
-UDT_API ERRORINFO& getlasterror();
-UDT_API int getlasterror_code();
-UDT_API const char* getlasterror_desc();
+UDT_API ERRORINFO& getlasterror(void);
+UDT_API int getlasterror_code(void);
+UDT_API const char* getlasterror_desc(void);
 UDT_API int perfmon(UDTSOCKET u, TRACEINFO* perf, bool clear = true);
 UDT_API UDTSTATUS getsockstate(UDTSOCKET u);
 */
@@ -304,8 +304,8 @@ UDT_API extern const UDTSOCKET UDT_INVALID_SOCK;
 UDT_API extern const int UDT_ERROR;
 
 // library initialization
-UDT_API extern int udt_startup();
-UDT_API extern int udt_cleanup();
+UDT_API extern int udt_startup(void);
+UDT_API extern int udt_cleanup(void);
 
 // socket operations
 UDT_API extern UDTSOCKET udt_socket(int af, int type, int protocol);
@@ -330,9 +330,9 @@ UDT_API extern int64_t udt_sendfile2(UDTSOCKET u, const char* path, int64_t* off
 UDT_API extern int64_t udt_recvfile2(UDTSOCKET u, const char* path, int64_t* offset, int64_t size, int block/* = 7280000*/);
 
 // last error detection
-UDT_API extern const char * udt_getlasterror_desc();
-UDT_API extern int udt_getlasterror_code();
-UDT_API extern void udt_clearlasterror();
+UDT_API extern const char * udt_getlasterror_desc(void);
+UDT_API extern int udt_getlasterror_code(void);
+UDT_API extern void udt_clearlasterror(void);
 
 // performance track
 UDT_API extern int udt_perfmon(UDTSOCKET u, UDT_TRACEINFO * perf, int clear);
@@ -354,7 +354,7 @@ enum UDT_EPOLLOpt
    UDT_UDT_EPOLL_ERR = 0x8
 };
 
-UDT_API extern int udt_epoll_create();
+UDT_API extern int udt_epoll_create(void);
 UDT_API extern int udt_epoll_add_usock(int eid, UDTSOCKET u, const int* events);
 UDT_API extern int udt_epoll_add_ssock(int eid, SYSSOCKET s, const int* events);
 UDT_API extern int udt_epoll_remove_usock(int eid, UDTSOCKET u);
