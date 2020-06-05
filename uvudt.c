@@ -5,7 +5,7 @@
 
 #include <stdlib.h>
 #include <assert.h>
-#include "udtc.h"
+#include "UDT4/src/udtc.h"
 #include "uvudt.h"
 
 //#define UDT_DEBUG 1
