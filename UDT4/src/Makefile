@@ -5,7 +5,7 @@ ifndef os
 endif
 
 ifndef arch
-   arch = x86_64 
+   arch = x86_64
 endif
 
 CCFLAGS = -fPIC -Wall -Wextra -D$(os) -finline-functions -O3 -fno-strict-aliasing -fvisibility=hidden -DEVPIPE_OSFD
@@ -32,6 +32,10 @@ endif
 
 ifeq ($(arch), x86_64)
    CCFLAGS += -Dx86_64
+endif
+
+ifeq ($(arch), arm64)
+   CCFLAGS += -Darm64
 endif
 
 OBJS = api.o buffer.o cache.o ccc.o channel.o common.o udt_core.o epoll.o list.o md5.o packet.o queue.o window.o udtc.o

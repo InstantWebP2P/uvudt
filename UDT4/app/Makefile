@@ -5,7 +5,7 @@ ifndef os
 endif
 
 ifndef arch
-   arch = x86_64 
+   arch = x86_64
 endif
 
 CCFLAGS = -Wall -D$(os) -I../src -finline-functions -O3
@@ -28,6 +28,10 @@ endif
 
 ifeq ($(arch), SPARC)
    CCFLAGS += -DSPARC
+endif
+
+ifeq ($(arch), arm64)
+   CCFLAGS += -Darm64
 endif
 
 LDFLAGS = -Wl,-rpath,../src -L../src -ludt -lstdc++ -lpthread -lm
