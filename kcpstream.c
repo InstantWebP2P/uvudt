@@ -5,16 +5,28 @@
 
 #include <stdlib.h>
 #include <assert.h>
+#include <string.h>
 #include "kcp/ikcp.h"
 #include "uvkcp.h"
 
+// KCP context structure (same as in uvkcp.c)
+struct kcp_context_s {
+    ikcpcb *kcp;
+    uv_os_sock_t udp_fd;
+    struct sockaddr_storage peer_addr;
+    socklen_t peer_addr_len;
+    uv_loop_t *loop;
+    uv_poll_t poll_handle;
+    uv_timer_t timer_handle;
+    int is_connected;
+    int is_listening;
+};
 
-#if 0
-// consume KCP Os fd event
-static void kcp_consume_osfd(uv_os_sock_t os_fd)
-{
-    char dummy;
-    recv(os_fd, &dummy, sizeof(dummy), 0);
+typedef struct kcp_context_s kcp_context_t;
+
+// Helper to get KCP context from uvkcp_t
+static kcp_context_t* kcp__get_context(uvkcp_t* stream) {
+    return (kcp_context_t*)stream->poll.data;
 }
 
 static size_t kcp__buf_count(const uv_buf_t bufs[], int nbufs)
@@ -66,14 +78,12 @@ int kcp__stream_open(uvkcp_t* kcp, uv_os_sock_t fd, int flags) {
     // init uv_poll_t
     if (uv_poll_init_socket(kcp->aloop, poll, fd) < 0)
     {
-        kcp_close(kcp->kcpfd);
         return -1;
     }
 
     // start polling
     if (uv_poll_start(poll, UV_READABLE, kcp__stream_io) < 0)
     {
-        kcp_close(kcp->kcpfd);
         return -1;
     }
 
@@ -129,100 +139,6 @@ void kcp__stream_destroy(uvkcp_t* stream) {
   }
 }
 
-void kcp__server_io(uv_poll_t *handle, int status, int events) {
-    uvkcp_t *stream = (uvkcp_t *)handle;
-    int optlen;
-
-
-    assert(handle->type == UV_POLL);
-    assert(!(stream->flags & UVKCP_FLAG_CLOSING));
-
-    // !!! always consume KCP/OSfd event here
-    kcp_consume_osfd(stream->fd);
-
-    if (stream->accepted_kcpfd != -1)
-    {
-        return;
-    }
-    
-    while (stream->kcpfd != -1) {
-        int kcpfd = kcp__accept(stream->kcpfd);
-
-          ///fprintf(stdout, "func:%s, line:%d, errno: %d, %s\n", __FUNCTION__, __LINE__, kcp_getlasterror_code(), kcp_getlasterror_desc());
-
-          if (kcpfd < 0) {
-        ///fprintf(stdout, "func:%s, line:%d, errno: %d, %s\n", __FUNCTION__, __LINE__, kcp_getlasterror_code(), kcp_getlasterror_desc());
-
-        if (kcp_getlasterror_code() == KCP_EASYNCRCV /*errno == EAGAIN || errno == EWOULDBLOCK*/) {
-          /* No problem. */
-          return;
-        } else if (kcp_getlasterror_code() == KCP_ESECFAIL /*errno == ECONNABORTED*/) {
-          /* ignore */
-          continue;
-        } else {
-          //////kcp__set_sys_error(kcp->loop, uvkcp_translate_kcp_error());
-          stream->connection_cb(stream, UV_ECONNREFUSED);
-                  // check KCP socket state
-                  if (KCP_LISTENING != kcp_getsockstate(stream->kcpfd)) {
-                      ///kcp_consume_osfd(stream->fd);
-                      return;
-                  }
-        }
-      } else {
-        stream->accepted_kcpfd = kcpfd;
-        // fill Os fd in case socket broken
-        if (kcp_getsockopt(kcpfd, 0, (int)KCP_KCP_OSFD, &stream->accepted_fd, &optlen)) {
-                  stream->connection_cb(stream, UV_ECONNABORTED);
-              } else {
-                  stream->connection_cb(stream, 0);
-              }
-          }
-          
-          if (stream->accepted_kcpfd != -1) {
-              /* The user hasn't yet accepted called uvkcp_accept() */
-              return;
-      }
-  }
-}
-
-int uvkcp_accept(uvkcp_t* server, uvkcp_t* client) {
-  uvkcp_t* streamServer;
-  uvkcp_t* streamClient;
-  int status;
-
-  /* TODO document this */
-  assert(server->aloop == client->aloop);
-
-  status = -1;
-
-  streamServer = (uvkcp_t*)server;
-  streamClient = (uvkcp_t*)client;
-
-  if (streamServer->accepted_kcpfd == -1) {
-    goto out;
-  }
-  
-  streamClient->kcpfd = streamServer->accepted_kcpfd;
-
-  if (kcp__stream_open(streamClient, streamServer->accepted_fd,
-        UVKCP_FLAG_READABLE | UVKCP_FLAG_WRITABLE)) {
-    /* TODO handle error */
-      // clear pending Os fd event
-      kcp_consume_osfd(streamServer->accepted_fd);
-      kcp_close(streamServer->accepted_kcpfd);
-
-    streamServer->accepted_kcpfd = -1;
-    goto out;
-  }
-
-  streamServer->accepted_kcpfd = -1;
-  status = 0;
-
-out:
-  return status;
-}
-
-
 uvkcp_write_t* uvkcp_write_queue_head(uvkcp_t* stream) {
   QUEUE* q;
   uvkcp_write_t* req;
@@ -257,11 +173,8 @@ static void kcp__drain(uvkcp_t* stream) {
 
     req = stream->shutdown_req;
     stream->shutdown_req = NULL;
-  
-    //!!! close KCP socket anyway
-    kcp_close(stream->kcpfd); 
-  
-    // KCP don't need drain
+
+    // KCP doesn't need explicit close like UDT
     stream->flags &= ~UVKCP_FLAG_SHUTTING;
     stream->flags |=  UVKCP_FLAG_SHUT;
     if (req->cb) {
@@ -321,7 +234,10 @@ static void kcp__write(uvkcp_t* stream) {
     return;
   }
 
-  assert(stream->kcpfd != -1);
+  kcp_context_t* ctx = kcp__get_context(stream);
+  if (!ctx || !ctx->kcp) {
+    return;
+  }
 
   /* Get the request at the head of the queue. */
   req = uvkcp_write_queue_head(stream);
@@ -335,34 +251,33 @@ static void kcp__write(uvkcp_t* stream) {
   iov = &(req->bufs[req->write_index]);
   iovcnt = req->nbufs - req->write_index;
 
-    {
-      int next = 1, it = 0;
-      n = -1;
-      for (it = 0; it < iovcnt; it ++) {
-        size_t ilen = 0;
-        while (ilen < iov[it].len) {
-          int rc = kcp_send(stream->kcpfd, ((char *)iov[it].base)+ilen, iov[it].len-ilen, 0);
-          if (rc <= 0) {
-            next = 0;
-            break;
-          } else  {
-            if (n == -1) n = 0;
-            n += rc;
-            ilen += rc;
-          }
+  {
+    int next = 1, it = 0;
+    n = -1;
+    for (it = 0; it < iovcnt; it ++) {
+      size_t ilen = 0;
+      while (ilen < iov[it].len) {
+        // Use KCP send function
+        int rc = ikcp_send(ctx->kcp, ((char *)iov[it].base)+ilen, iov[it].len-ilen);
+        if (rc < 0) {
+          next = 0;
+          break;
+        } else  {
+          if (n == -1) n = 0;
+          n += (iov[it].len - ilen);
+          ilen = iov[it].len; // KCP sends entire buffer
         }
-        if (next == 0) break;
       }
+      if (next == 0) break;
     }
+  }
 
   if (n < 0) {
-      if (kcp_getlasterror_code() != KCP_EASYNCSND) {
-          /* Error */
-          req->error = uvkcp_translate_kcp_error();
-          stream->write_queue_size -= kcp__write_req_size(req);
-          kcp__write_req_finish(req);
-          return;
-       }
+      /* Error */
+      req->error = UV_EIO;
+      stream->write_queue_size -= kcp__write_req_size(req);
+      kcp__write_req_finish(req);
+      return;
   } else {
     /* Successful write */
 
@@ -378,7 +293,7 @@ static void kcp__write(uvkcp_t* stream) {
         buf->len -= n;
         stream->write_queue_size -= n;
         n = 0;
-        
+
         /* Break loop and ensure the watcher is pending. */
         break;
       } else {
@@ -450,7 +365,7 @@ static void kcp__read(uvkcp_t* stream) {
       && (stream->flags & UVKCP_FLAG_READABLE)
       && (count-- > 0)) {
     assert(stream->alloc_cb);
-    
+
     buf = uv_buf_init(NULL, 0);
     stream->alloc_cb((uv_handle_t *)stream, 64 * 1024, &buf);
     if (buf.base == NULL || buf.len == 0)
@@ -460,27 +375,24 @@ static void kcp__read(uvkcp_t* stream) {
         return;
     }
     assert(buf.base != NULL);
-    
-    assert(stream->kcpfd != -1);
+
+    kcp_context_t* ctx = kcp__get_context(stream);
+    if (!ctx || !ctx->kcp) {
+        stream->read_cb(stream, UV_ENOTCONN, &buf);
+        return;
+    }
 
     // KCP recv
     {
-        nread = kcp_recv(stream->kcpfd, buf.base, buf.len, 0);
-        if (nread <= 0) {
-            // consume Os fd event
-            ///kcp_consume_osfd(stream->fd);
-      }
-        ///fprintf(stdout, "func:%s, line:%d, expect rd: %d, real rd: %d\n", __FUNCTION__, __LINE__, buf.len, nread);
+        nread = ikcp_recv(ctx->kcp, buf.base, buf.len);
 
-      if (nread < 0) {
+        if (nread < 0) {
         /* Error */
-        int kcperr = uvkcp_translate_kcp_error();
-
-        if (kcperr == UV_EAGAIN) {
+        if (nread == -1) {
           /* Wait for the next one. */
                 stream->read_cb(stream, 0, &buf);
           return;
-        } else if ((kcperr == UV_EPIPE) || (kcperr == UV_ENOTSOCK)) {
+        } else if (nread == -2) {
                 // socket broken or invalid socket as EOF
                 stream->read_cb(stream, UV_EOF, &buf);
             return;
@@ -513,7 +425,11 @@ int uvkcp_shutdown(uvkcp_shutdown_t* req, uvkcp_t* stream, uvkcp_shutdown_cb cb)
 
   assert((poll->type == UV_POLL) &&
          "uvkcp_shutdown (unix) only supports uv_handle_t right now");
-  assert(stream->kcpfd != -1);
+
+  kcp_context_t* ctx = kcp__get_context(stream);
+  if (!ctx || !ctx->kcp) {
+    return -1;
+  }
 
   if (!(stream->flags & UVKCP_FLAG_WRITABLE) ||
         stream->flags & UVKCP_FLAG_SHUT ||
@@ -536,32 +452,25 @@ void kcp__stream_io(uv_poll_t * handle, int status, int events) {
     uvkcp_t *stream = (uvkcp_t *)handle;
 
     assert(handle->type == UV_POLL);
-    assert(stream->kcpfd != -1);
 
-    // !!! always consume KCP/OSfd event here
-    kcp_consume_osfd(stream->fd);
+    kcp_context_t* ctx = kcp__get_context(stream);
+    if (!ctx || !ctx->kcp) {
+        return;
+    }
 
     if (stream->connect_req) {
       kcp__stream_connect(stream);
     } else {
-    // check KCP event
-      int kcpev, optlen;
-      
-      if (kcp_getsockopt(stream->kcpfd, 0, KCP_KCP_EVENT, &kcpev, &optlen) < 0) {
-          // check error anyway
-          kcp__read(stream);
-          
-          kcp__write(stream);
-          kcp__write_callbacks(stream);
-      } else {
-          if (kcpev & (KCP_KCP_EPOLL_IN | KCP_KCP_EPOLL_ERR)) {
-              kcp__read(stream);
-          }
-          if (kcpev & (KCP_KCP_EPOLL_OUT | KCP_KCP_EPOLL_ERR)) {
-              kcp__write(stream);
-              kcp__write_callbacks(stream);
-      }
-      }
+      // Update KCP state
+      IUINT32 current = uv_now(ctx->loop);
+      ikcp_update(ctx->kcp, current);
+
+      // Check for data to read
+      kcp__read(stream);
+
+      // Check for data to write
+      kcp__write(stream);
+      kcp__write_callbacks(stream);
     }
 }
 
@@ -585,25 +494,14 @@ static void kcp__stream_connect(uvkcp_t* stream) {
     error = stream->delayed_error;
     stream->delayed_error = 0;
   } else {
-        /* Normal situation: we need to get the socket error from the kernel. */
-        assert(stream->kcpfd != -1);
-      
-      // notes: check socket state until connect successfully
-      switch (kcp_getsockstate(stream->kcpfd)) {
-      case KCP_CONNECTED:
-        error = 0;
-        // consume Os fd event
-        ///kcp_consume_osfd(stream->fd);
-        break;
-      case KCP_CONNECTING:
-        error = UV_EALREADY;
-        break;
-      default:
-        error = uvkcp_translate_kcp_error();
-        // consume Os fd event
-        ///kcp_consume_osfd(stream->fd);
-        break;
-      }
+        kcp_context_t* ctx = kcp__get_context(stream);
+        if (!ctx || !ctx->kcp) {
+            error = UV_ENOTCONN;
+        } else if (ctx->is_connected) {
+            error = 0;
+        } else {
+            error = UV_EALREADY;
+        }
   }
 
   if (error == UV_EALREADY)
@@ -612,7 +510,6 @@ static void kcp__stream_connect(uvkcp_t* stream) {
   stream->connect_req = NULL;
 
   if (req->cb) {
-    //////kcp__set_sys_error(kcp->loop, error);
     req->cb(req, error ? UV_ECONNREFUSED : 0);
   }
 }
@@ -625,9 +522,8 @@ int uvkcp_write(uvkcp_write_t *req, uvkcp_t *stream, const uv_buf_t bufs[], unsi
 {
     int empty_queue;
 
-    if (stream->kcpfd < 0)
-    {
-        //////kcp__set_sys_error(kcp->loop, EBADF);
+    kcp_context_t* ctx = kcp__get_context(stream);
+    if (!ctx || !ctx->kcp) {
         return -1;
     }
 
@@ -637,7 +533,6 @@ int uvkcp_write(uvkcp_write_t *req, uvkcp_t *stream, const uv_buf_t bufs[], unsi
          (flags & UVKCP_FLAG_SHUTTING) || (flags & UVKCP_FLAG_SHUT) ||
          (flags & UVKCP_FLAG_CLOSING)  || (flags & UVKCP_FLAG_CLOSED))
     {
-        printf("uvkcp write rejected\n");
         return -1;
     }
 
@@ -677,7 +572,6 @@ int uvkcp_write(uvkcp_write_t *req, uvkcp_t *stream, const uv_buf_t bufs[], unsi
     {
         kcp__write(stream);
     } else {
-        printf("uvkcp write no buffer\n");
         return UV_ENOBUFS;
     }
 
@@ -740,7 +634,7 @@ int uvkcp_read_start(uvkcp_t *stream, uv_alloc_cb alloc_cb,
 {
     uv_poll_t *poll = (uv_poll_t *)stream;
     assert(poll->type == UV_POLL);
-    
+
     /* The UVKCP_FLAG_READABLE flag is irrelevant of the state of the tcp - it just
    * expresses the desired state of the user.
    */
@@ -750,7 +644,11 @@ int uvkcp_read_start(uvkcp_t *stream, uv_alloc_cb alloc_cb,
     /* TODO: keep track of tcp state. If we've gotten a EOF then we should
    * not start the IO watcher.
    */
-    assert(stream->kcpfd != -1);
+    kcp_context_t* ctx = kcp__get_context(stream);
+    if (!ctx || !ctx->kcp) {
+        return -1;
+    }
+
     assert(alloc_cb);
 
     stream->read_cb = read_cb;
@@ -773,11 +671,11 @@ int uvkcp_read_stop(uvkcp_t* stream) {
     {
         return -1;
     }
-    
+
     stream->flags   &= ~UVKCP_FLAG_READABLE;
     stream->read_cb  = NULL;
     stream->alloc_cb = NULL;
-    
+
     return 0;
 }
 
@@ -793,12 +691,11 @@ int uvkcp_is_writable(uvkcp_t* stream) {
 
 
 int uvkcp_set_blocking(uvkcp_t* handle, int blocking) {
-    return kcp__nonblock(handle->kcpfd, !blocking);
+    // KCP is inherently non-blocking, this is a no-op
+    return 0;
 }
 
 
 size_t uvkcp_get_write_queue_size(const uvkcp_t* stream) {
   return stream->write_queue_size;
 }
-
-#endif

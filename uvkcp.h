@@ -287,6 +287,7 @@ UV_EXTERN int  kcp__nonblock(int kcpfd, int set);
 UV_EXTERN int  kcp__accept(int kcpfd);
 UV_EXTERN void kcp__stream_init(uv_loop_t* loop, uvkcp_t* stream);
 UV_EXTERN int  kcp__stream_open(uvkcp_t* kcp, uv_os_sock_t fd, int flags);
+UV_EXTERN void kcp__stream_destroy(uvkcp_t* stream);
 
 #ifdef __cplusplus
 }

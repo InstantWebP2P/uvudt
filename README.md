@@ -1,8 +1,6 @@
 # uvkcp
 KCP Transport with libUV
 
-* [KCP protocol](https://github.com/skywind3000/kcp)
-
 ### License
 (The MIT License)
 
