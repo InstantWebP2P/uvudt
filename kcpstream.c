@@ -20,6 +20,7 @@ struct kcp_context_s {
     uv_timer_t timer_handle;
     int is_connected;
     int is_listening;
+    int timer_active;
 };
 
 typedef struct kcp_context_s kcp_context_t;
@@ -45,6 +46,7 @@ static size_t kcp__buf_count(const uv_buf_t bufs[], int nbufs)
 static void kcp__stream_connect(uvkcp_t *stream);
 static void kcp__write(uvkcp_t *stream);
 static void kcp__read(uvkcp_t *stream);
+static void kcp__timer_cb(uv_timer_t* timer);
 void kcp__stream_io(uv_poll_t *handle, int status, int events);
 
 void kcp__stream_init(uv_loop_t* loop, uvkcp_t* stream) {
@@ -350,11 +352,42 @@ static void kcp__write_callbacks(uvkcp_t* stream) {
 }
 
 
+static void kcp__read_udp_data(uvkcp_t* stream) {
+  kcp_context_t* ctx = kcp__get_context(stream);
+  if (!ctx || !ctx->kcp || ctx->udp_fd == -1) {
+    return;
+  }
+
+  char buffer[65536];
+  struct sockaddr_storage peer_addr;
+  socklen_t addr_len = sizeof(peer_addr);
+
+  int count = 32; // Prevent loop starvation
+
+  while (count-- > 0) {
+    ssize_t nread = recvfrom(ctx->udp_fd, buffer, sizeof(buffer), 0,
+                            (struct sockaddr*)&peer_addr, &addr_len);
+
+    if (nread <= 0) {
+      break; // No more data or error
+    }
+
+    // Feed the raw UDP data to KCP
+    int rc = ikcp_input(ctx->kcp, buffer, nread);
+    if (rc < 0) {
+      // KCP input error, but continue processing
+      break;
+    }
+  }
+}
+
 static void kcp__read(uvkcp_t* stream) {
   uv_buf_t buf;
   ssize_t nread;
   int count;
 
+  // First, read any available UDP data and feed it to KCP
+  kcp__read_udp_data(stream);
 
   /* Prevent loop starvation when the data comes in as fast as (or faster than)
    * we can read it. XXX Need to rearm fd if we switch to edge-triggered I/O.
@@ -448,6 +481,29 @@ int uvkcp_shutdown(uvkcp_shutdown_t* req, uvkcp_t* stream, uvkcp_shutdown_cb cb)
   return 0;
 }
 
+static void kcp__timer_cb(uv_timer_t* timer) {
+    kcp_context_t* ctx = (kcp_context_t*)timer->data;
+    if (!ctx || !ctx->kcp) {
+        return;
+    }
+
+    IUINT32 current = uv_now(ctx->loop);
+    IUINT32 next_update = ikcp_check(ctx->kcp, current);
+
+    // If next_update is 0, we need to update immediately
+    if (next_update == 0) {
+        ikcp_update(ctx->kcp, current);
+        next_update = ikcp_check(ctx->kcp, current);
+    }
+
+    // Reschedule timer for next update time
+    if (next_update > 0) {
+        uv_timer_start(&ctx->timer_handle, kcp__timer_cb, next_update, 0);
+    } else {
+        ctx->timer_active = 0;
+    }
+}
+
 void kcp__stream_io(uv_poll_t * handle, int status, int events) {
     uvkcp_t *stream = (uvkcp_t *)handle;
 
@@ -461,9 +517,19 @@ void kcp__stream_io(uv_poll_t * handle, int status, int events) {
     if (stream->connect_req) {
       kcp__stream_connect(stream);
     } else {
-      // Update KCP state
-      IUINT32 current = uv_now(ctx->loop);
-      ikcp_update(ctx->kcp, current);
+      // Start timer if not already active
+      if (!ctx->timer_active) {
+        IUINT32 current = uv_now(ctx->loop);
+        IUINT32 next_update = ikcp_check(ctx->kcp, current);
+        if (next_update == 0) {
+          ikcp_update(ctx->kcp, current);
+          next_update = ikcp_check(ctx->kcp, current);
+        }
+        if (next_update > 0) {
+          uv_timer_start(&ctx->timer_handle, kcp__timer_cb, next_update, 0);
+          ctx->timer_active = 1;
+        }
+      }
 
       // Check for data to read
       kcp__read(stream);
@@ -698,4 +764,19 @@ int uvkcp_set_blocking(uvkcp_t* handle, int blocking) {
 
 size_t uvkcp_get_write_queue_size(const uvkcp_t* stream) {
   return stream->write_queue_size;
+}
+
+int uvkcp_accept(uvkcp_t* server, uvkcp_t* client) {
+  /* KCP is a connectionless protocol over UDP, so accept is essentially a no-op.
+   * The "connection" is established when data is exchanged.
+   * This function just verifies both handles are using the same loop.
+   */
+  assert(server->aloop == client->aloop);
+
+  /* For KCP, we don't need to transfer any file descriptors or connection state
+   * since it's connectionless. The client handle should already be properly
+   * initialized and ready to use.
+   */
+
+  return 0;
 }

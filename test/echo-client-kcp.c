@@ -1,4 +1,4 @@
-#include "uvudt.h"
+#include "uvkcp.h"
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -14,12 +14,12 @@
 #define TIME 6000
 
 typedef struct {
-  int domain;    
+  int domain;
   int pongs;
   int state;
-  uvudt_t udt;
-  uvudt_connect_t connect_req;
-  uvudt_shutdown_t shutdown_req;
+  uvkcp_t kcp;
+  uvkcp_connect_t connect_req;
+  uvkcp_shutdown_t shutdown_req;
 } pinger_t;
 
 typedef struct buf_s {
@@ -66,14 +66,14 @@ static void buf_free(uv_buf_t * buf) {
 static void pinger_close_cb(uv_handle_t* handle) {
   pinger_t* pinger;
 
-  pinger = (pinger_t*)handle->data;
+  pinger = (pinger_t*)((uvkcp_t*)handle)->poll.data;
   printf("ping_pongs: %d roundtrips/s in ip%d\n", (1000 * pinger->pongs) / TIME, pinger->domain);
 
   free(pinger);
 }
 
 
-static void pinger_write_cb(uvudt_write_t* req, int status) {
+static void pinger_write_cb(uvkcp_write_t* req, int status) {
   assert(status == 0);
 
   free(req);
@@ -81,32 +81,32 @@ static void pinger_write_cb(uvudt_write_t* req, int status) {
 
 
 static void pinger_write_ping(pinger_t* pinger) {
-  uvudt_write_t* req;
+  uvkcp_write_t* req;
   uv_buf_t buf;
 
   buf.base = (char*)&PING;
   buf.len = strlen(PING);
 
   req = malloc(sizeof *req);
-  if (uvudt_write(req, (uvudt_t*) &pinger->udt, &buf, 1, pinger_write_cb)) {
-    printf("uvudt_write failed");
+  if (uvkcp_write(req, (uvkcp_t*) &pinger->kcp, &buf, 1, pinger_write_cb)) {
+    printf("uvkcp_write failed");
   }
 }
 
 
-static void pinger_shutdown_cb(uvudt_shutdown_t* req, int status) {
-  uvudt_close(req->handle, pinger_close_cb);
+static void pinger_shutdown_cb(uvkcp_shutdown_t* req, int status) {
+  uvkcp_close(req->handle, pinger_close_cb);
 
   assert(status == 0);
 }
 
 
-static void pinger_read_cb(uvudt_t* udt, ssize_t nread, uv_buf_t * buf) {
+static void pinger_read_cb(uvkcp_t* kcp, ssize_t nread, const uv_buf_t * buf) {
   ssize_t i;
   pinger_t* pinger;
 
 
-  pinger = (pinger_t*)udt->poll.data;
+  pinger = (pinger_t*)kcp->poll.data;
 
   if (nread < 0) {
     if (buf->base) {
@@ -125,7 +125,7 @@ static void pinger_read_cb(uvudt_t* udt, ssize_t nread, uv_buf_t * buf) {
     if (pinger->state == 0) {
       pinger->pongs++;
       if (uv_now(loop) - start_time > TIME) {
-        uvudt_shutdown(&pinger->shutdown_req, udt, pinger_shutdown_cb);
+        uvkcp_shutdown(&pinger->shutdown_req, kcp, pinger_shutdown_cb);
         break;
       } else {
         pinger_write_ping(pinger);
@@ -137,7 +137,7 @@ static void pinger_read_cb(uvudt_t* udt, ssize_t nread, uv_buf_t * buf) {
 }
 
 
-static void pinger_connect_cb(uvudt_connect_t* req, int status) {
+static void pinger_connect_cb(uvkcp_connect_t* req, int status) {
   pinger_t *pinger = (pinger_t*)req->handle->poll.data;
 
   printf("Connect success\n");
@@ -146,8 +146,8 @@ static void pinger_connect_cb(uvudt_connect_t* req, int status) {
 
   pinger_write_ping(pinger);
 
-  if (uvudt_read_start(req->handle, buf_alloc, pinger_read_cb)) {
-    printf("uvudt_read_start failed");
+  if (uvkcp_read_start(req->handle, buf_alloc, pinger_read_cb)) {
+    printf("uvkcp_read_start failed");
   }
 }
 
@@ -167,14 +167,14 @@ static void pinger_new(int port) {
   pinger->pongs = 0;
 
   /* Try to connect to the server and do NUM_PINGS ping-pongs. */
-  r = uvudt_init(loop, &pinger->udt);
+  r = uvkcp_init(loop, &pinger->kcp);
   assert(!r);
 
-  pinger->udt.poll.data = pinger;
+  pinger->kcp.poll.data = pinger;
 
-  uvudt_bind(&pinger->udt, &client_addr, 1, 1);
+  uvkcp_bind(&pinger->kcp, &client_addr, 1, 1);
 
-  r = uvudt_connect(&pinger->connect_req, &pinger->udt, &server_addr, pinger_connect_cb);
+  r = uvkcp_connect(&pinger->connect_req, &pinger->kcp, &server_addr, pinger_connect_cb);
   assert(!r);
 }
 
@@ -194,14 +194,14 @@ static void pinger_new6(int port)
     pinger->pongs = 0;
 
     /* Try to connect to the server and do NUM_PINGS ping-pongs. */
-    r = uvudt_init(loop, &pinger->udt);
+    r = uvkcp_init(loop, &pinger->kcp);
     assert(!r);
 
-    pinger->udt.poll.data = pinger;
+    pinger->kcp.poll.data = pinger;
 
-    uvudt_bind(&pinger->udt, &client_addr, 1, 1);
+    uvkcp_bind(&pinger->kcp, &client_addr, 1, 1);
 
-    r = uvudt_connect(&pinger->connect_req, &pinger->udt, &server_addr, pinger_connect_cb);
+    r = uvkcp_connect(&pinger->connect_req, &pinger->kcp, &server_addr, pinger_connect_cb);
     assert(!r);
 }
 

@@ -23,6 +23,7 @@ struct kcp_context_s {
     uv_timer_t timer_handle;
     int is_connected;
     int is_listening;
+    int timer_active;
 };
 
 typedef struct kcp_context_s kcp_context_t;
@@ -69,6 +70,14 @@ int uvkcp_init(uv_loop_t *loop, uvkcp_t *handle) {
     ctx->udp_fd = -1;
     ctx->is_connected = 0;
     ctx->is_listening = 0;
+    ctx->timer_active = 0;
+
+    // Initialize timer handle
+    if (uv_timer_init(loop, &ctx->timer_handle) < 0) {
+        free(ctx);
+        return UV_ENOMEM;
+    }
+    ctx->timer_handle.data = ctx;
 
     // Store context in handle
     handle->poll.data = ctx;
@@ -164,10 +173,8 @@ int uvkcp_connect(uvkcp_connect_t *req, uvkcp_t *handle, const struct sockaddr *
     // Mark as connected
     ctx->is_connected = 1;
 
-    // Call connection callback immediately (KCP is connectionless)
-    if (cb) {
-        cb(req, 0);
-    }
+    // For KCP (connectionless protocol), we'll let the stream logic
+    // handle the connection callback through the poll handler
 
     return 0;
 }
@@ -190,6 +197,12 @@ int uvkcp_close(uvkcp_t *handle, uv_close_cb close_cb) {
     kcp_context_t *ctx = (kcp_context_t *)handle->poll.data;
     if (!ctx) {
         return UV_EINVAL;
+    }
+
+    // Stop timer
+    if (ctx->timer_active) {
+        uv_timer_stop(&ctx->timer_handle);
+        ctx->timer_active = 0;
     }
 
     // Cleanup KCP

@@ -1,30 +1,31 @@
 
-#include "uvudt.h"
+#include "uvkcp.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <string.h>
 
 #define TEST_PORT (51686)
 
 typedef struct {
-  uvudt_write_t req;
+  uvkcp_write_t req;
   uv_buf_t buf;
 } write_req_t;
 
 static uv_loop_t* loop;
 
-static uvudt_t udtServer;
-static uvudt_t *server;
-static uvudt_t udt6Server;
-static uvudt_t *server6;
+static uvkcp_t kcpServer;
+static uvkcp_t *server;
+static uvkcp_t kcp6Server;
+static uvkcp_t *server6;
 
-static void after_write(uvudt_write_t* req, int status);
-static void after_read(uvudt_t*, ssize_t nread, const uv_buf_t* buf);
+static void after_write(uvkcp_write_t* req, int status);
+static void after_read(uvkcp_t*, ssize_t nread, const uv_buf_t* buf);
 static void on_close(uv_handle_t* peer);
-static void on_connection(uvudt_t*, int status);
+static void on_connection(uvkcp_t*, int status);
 
 
-static void after_write(uvudt_write_t* req, int status) {
+static void after_write(uvkcp_write_t* req, int status) {
   write_req_t* wr;
 
   /* Free the read/write buffer and the request */
@@ -36,23 +37,23 @@ static void after_write(uvudt_write_t* req, int status) {
     return;
 
   fprintf(stderr,
-          "uvudt_write error: %s - %s\n",
+          "uvkcp_write error: %s - %s\n",
           uv_err_name(status),
           uv_strerror(status));
 }
 
 
-static void after_shutdown(uvudt_shutdown_t* req, int status) {
-  uvudt_close( req->handle, on_close);
+static void after_shutdown(uvkcp_shutdown_t* req, int status) {
+  uvkcp_close( req->handle, on_close);
   free(req);
 }
 
 
-static void after_read(uvudt_t* handle,
+static void after_read(uvkcp_t* handle,
                        ssize_t nread,
                        const uv_buf_t* buf) {
   write_req_t *wr;
-  uvudt_shutdown_t* sreq;
+  uvkcp_shutdown_t* sreq;
 
   if (nread < 0) {
     /* Error or EOF */
@@ -60,7 +61,7 @@ static void after_read(uvudt_t* handle,
 
     free(buf->base);
     sreq = malloc(sizeof* sreq);
-    assert(0 == uvudt_shutdown(sreq, handle, after_shutdown));
+    assert(0 == uvkcp_shutdown(sreq, handle, after_shutdown));
     return;
   }
 
@@ -74,8 +75,8 @@ static void after_read(uvudt_t* handle,
   assert(wr != NULL);
   wr->buf = uv_buf_init(buf->base, nread);
 
-  if (uvudt_write(&wr->req, handle, &wr->buf, 1, after_write)) {
-    printf("uvudt_write failed");
+  if (uvkcp_write(&wr->req, handle, &wr->buf, 1, after_write)) {
+    printf("uvkcp_write failed");
   }
 }
 
@@ -93,8 +94,8 @@ static void echo_alloc(uv_handle_t* handle,
 }
 
 
-static void on_connection(uvudt_t* server, int status) {
-  uvudt_t* stream;
+static void on_connection(uvkcp_t* server, int status) {
+  uvkcp_t* stream;
   int r;
 
   if (status != 0) {
@@ -102,47 +103,47 @@ static void on_connection(uvudt_t* server, int status) {
   } else printf("Connect success\n");
   assert(status == 0);
 
-    stream = malloc(sizeof(uvudt_t));
+    stream = malloc(sizeof(uvkcp_t));
     assert(stream != NULL);
-    r = uvudt_init(loop, stream);
+    r = uvkcp_init(loop, stream);
     assert(r == 0);
 
   /* associate server with stream */
   stream->poll.data = server;
 
-  r = uvudt_accept(server, stream);
+  r = uvkcp_accept(server, stream);
   assert(r == 0);
 
-  r = uvudt_read_start(stream, echo_alloc, after_read);
+  r = uvkcp_read_start(stream, echo_alloc, after_read);
 
   assert(r == 0);
 }
 
 
-static int udt4_echo_start(int port) {
+static int kcp4_echo_start(int port) {
   struct sockaddr_in addr;
   int r;
 
   assert(0 == uv_ip4_addr("0.0.0.0", port, &addr));
 
-  memset(&udtServer, 0, sizeof(udtServer));
-  server = &udtServer;
+  memset(&kcpServer, 0, sizeof(kcpServer));
+  server = &kcpServer;
 
-  r = uvudt_init(loop, &udtServer);
+  r = uvkcp_init(loop, &kcpServer);
   if (r) {
     /* TODO: Error codes */
     fprintf(stderr, "Socket creation error\n");
     return 1;
   }
 
-  r = uvudt_bind(&udtServer, (const struct sockaddr*) &addr, 1, 1);
+  r = uvkcp_bind(&kcpServer, (const struct sockaddr*) &addr, 1, 1);
   if (r) {
     /* TODO: Error codes */
     fprintf(stderr, "Bind error\n");
     return 1;
   }
 
-  r = uvudt_listen((uvudt_t*)&udtServer, SOMAXCONN, on_connection);
+  r = uvkcp_listen((uvkcp_t*)&kcpServer, SOMAXCONN, on_connection);
   if (r) {
     /* TODO: Error codes */
     fprintf(stderr, "Listen error %s\n", uv_err_name(r));
@@ -153,16 +154,16 @@ static int udt4_echo_start(int port) {
 }
 
 
-static int udt6_echo_start(int port) {
+static int kcp6_echo_start(int port) {
   struct sockaddr_in6 addr6;
   int r;
 
   assert(0 == uv_ip6_addr("::1", port, &addr6));
 
-  memset(&udt6Server, 0, sizeof(udt6Server));
-  server6 = &udt6Server;
+  memset(&kcp6Server, 0, sizeof(kcp6Server));
+  server6 = &kcp6Server;
 
-  r = uvudt_init(loop, &udt6Server);
+  r = uvkcp_init(loop, &kcp6Server);
   if (r) {
     /* TODO: Error codes */
     fprintf(stderr, "Socket creation error\n");
@@ -170,14 +171,14 @@ static int udt6_echo_start(int port) {
   }
 
   /* IPv6 is optional as not all platforms support it */
-  r = uvudt_bind(&udt6Server, (const struct sockaddr*) &addr6, 1, 1);
+  r = uvkcp_bind(&kcp6Server, (const struct sockaddr*) &addr6, 1, 1);
   if (r) {
     /* show message but return OK */
     fprintf(stderr, "IPv6 not supported\n");
     return 0;
   }
 
-  r = uvudt_listen((uvudt_t*)&udt6Server, SOMAXCONN, on_connection);
+  r = uvkcp_listen((uvkcp_t*)&kcp6Server, SOMAXCONN, on_connection);
   if (r) {
     /* TODO: Error codes */
     fprintf(stderr, "Listen error\n");
@@ -191,10 +192,10 @@ static int udt6_echo_start(int port) {
 int main(int argc, char *argv[]) {
   loop = uv_default_loop();
 
-  if (udt4_echo_start(TEST_PORT))
+  if (kcp4_echo_start(TEST_PORT))
     return 1;
 
-  if (udt6_echo_start(TEST_PORT))
+  if (kcp6_echo_start(TEST_PORT))
     return 1;
 
   uv_run(loop, UV_RUN_DEFAULT);
