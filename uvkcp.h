@@ -11,6 +11,20 @@ extern "C" {
 
 #include "uv.h"
 #include "queue.h"
+#include <stdio.h>
+
+// Debug logging
+#define UVKCP_DEBUG 1
+
+#ifdef UVKCP_DEBUG
+#define UVKCP_LOG(fmt, ...) printf("[UVKCP] %s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__)
+#define UVKCP_LOG_FUNC(fmt, ...) printf("[UVKCP] %s:%d %s: " fmt "\n", __FILE__, __LINE__, __func__, ##__VA_ARGS__)
+#define UVKCP_LOG_ERROR(fmt, ...) printf("[UVKCP ERROR] %s:%d %s: " fmt "\n", __FILE__, __LINE__, __func__, ##__VA_ARGS__)
+#else
+#define UVKCP_LOG(fmt, ...)
+#define UVKCP_LOG_FUNC(fmt, ...)
+#define UVKCP_LOG_ERROR(fmt, ...)
+#endif
 
 // request type
 struct uvkcp_connect_s;
@@ -46,8 +60,8 @@ enum uvkcp_flags_e
 // uvkcp_t
 struct uvkcp_s
 {
-    // inherit from uv_async_t
-    uv_async_t poll;
+    // inherit from uv_poll_t
+    uv_poll_t poll;
     uv_loop_t *aloop;
     int flags;
 
@@ -70,6 +84,9 @@ struct uvkcp_s
     int accepted_kcpfd;
     uv_os_sock_t udpfd;
     uv_os_sock_t accepted_udpfd;
+
+    // Private KCP context
+    void *kcp_ctx;
 };
 typedef struct uvkcp_s uvkcp_t;
 
@@ -133,9 +150,11 @@ typedef struct uvkcp_write_s uvkcp_write_t;
 UV_EXTERN int uvkcp_init(uv_loop_t *loop, uvkcp_t *handle);
 UV_EXTERN int uvkcp_open(uvkcp_t *handle, uv_os_sock_t sock);
 
-UV_EXTERN int uvkcp_nodelay(uvkcp_t *handle, int enable);
-UV_EXTERN int uvkcp_keepalive(uvkcp_t *handle, 
-                              int enable, 
+UV_EXTERN int uvkcp_nodelay(uvkcp_t *handle, int enable, int interval, int resend, int nc);
+UV_EXTERN int uvkcp_wndsize(uvkcp_t *handle, int sndwnd, int rcvwnd);
+UV_EXTERN int uvkcp_setmtu(uvkcp_t *handle, int mtu);
+UV_EXTERN int uvkcp_keepalive(uvkcp_t *handle,
+                              int enable,
                               unsigned int delay);
 UV_EXTERN int uvkcp_simultaneous_accepts(uvkcp_t *handle, int enable);
 

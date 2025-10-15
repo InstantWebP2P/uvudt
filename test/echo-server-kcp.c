@@ -55,8 +55,11 @@ static void after_read(uvkcp_t* handle,
   write_req_t *wr;
   uvkcp_shutdown_t* sreq;
 
+  printf("[SERVER] Read callback: nread=%zd\n", nread);
+
   if (nread < 0) {
     /* Error or EOF */
+    printf("[SERVER] Read error: %zd\n", nread);
     assert(nread == UV_EOF);
 
     free(buf->base);
@@ -67,6 +70,7 @@ static void after_read(uvkcp_t* handle,
 
   if (nread == 0) {
     /* Everything OK, but nothing read. */
+    printf("[SERVER] Read 0 bytes\n");
     free(buf->base);
     return;
   }
@@ -75,8 +79,9 @@ static void after_read(uvkcp_t* handle,
   assert(wr != NULL);
   wr->buf = uv_buf_init(buf->base, nread);
 
+  printf("[SERVER] Echoing back %zd bytes\n", nread);
   if (uvkcp_write(&wr->req, handle, &wr->buf, 1, after_write)) {
-    printf("uvkcp_write failed");
+    printf("[SERVER] uvkcp_write failed");
   }
 }
 
@@ -98,9 +103,11 @@ static void on_connection(uvkcp_t* server, int status) {
   uvkcp_t* stream;
   int r;
 
+  printf("[SERVER] Connection callback: status=%d\n", status);
+
   if (status != 0) {
-    fprintf(stderr, "Connect error %s\n", uv_err_name(status));
-  } else printf("Connect success\n");
+    fprintf(stderr, "[SERVER] Connect error %s\n", uv_err_name(status));
+  } else printf("[SERVER] Connect success\n");
   assert(status == 0);
 
     stream = malloc(sizeof(uvkcp_t));
@@ -109,13 +116,15 @@ static void on_connection(uvkcp_t* server, int status) {
     assert(r == 0);
 
   /* associate server with stream */
-  stream->poll.data = server;
+  ((uv_handle_t*)stream)->data = server;
 
   r = uvkcp_accept(server, stream);
   assert(r == 0);
 
-  r = uvkcp_read_start(stream, echo_alloc, after_read);
+  ///r = uvkcp_read_start(stream, echo_alloc, after_read);
+  r = uvkcp_read_start(server, echo_alloc, after_read);
 
+  printf("[SERVER] Started reading on accepted stream\n");
   assert(r == 0);
 }
 

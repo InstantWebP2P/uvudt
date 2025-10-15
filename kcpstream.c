@@ -21,13 +21,26 @@ struct kcp_context_s {
     int is_connected;
     int is_listening;
     int timer_active;
+
+    // Performance tracking
+    int64_t pktSentTotal;
+    int64_t pktRecvTotal;
+    int pktSndLossTotal;
+    int pktRcvLossTotal;
+    int pktRetransTotal;
+    int64_t bytesSentTotal;
+    int64_t bytesRecvTotal;
+    IUINT32 lastUpdateTime;
 };
 
 typedef struct kcp_context_s kcp_context_t;
 
 // Helper to get KCP context from uvkcp_t
 static kcp_context_t* kcp__get_context(uvkcp_t* stream) {
-    return (kcp_context_t*)stream->poll.data;
+    if (!stream || !stream->kcp_ctx) {
+        return NULL;
+    }
+    return (kcp_context_t*)stream->kcp_ctx;
 }
 
 static size_t kcp__buf_count(const uv_buf_t bufs[], int nbufs)
@@ -50,6 +63,8 @@ static void kcp__timer_cb(uv_timer_t* timer);
 void kcp__stream_io(uv_poll_t *handle, int status, int events);
 
 void kcp__stream_init(uv_loop_t* loop, uvkcp_t* stream) {
+  UVKCP_LOG_FUNC("Initializing KCP stream");
+
   // hold loop
   stream->aloop = loop;
   stream->flags = 0;
@@ -67,12 +82,17 @@ void kcp__stream_init(uv_loop_t* loop, uvkcp_t* stream) {
   stream->accepted_udpfd = -1;
   stream->accepted_fd = -1;
   stream->delayed_error = 0;
+  stream->kcp_ctx = NULL;
   QUEUE_INIT(&stream->write_queue);
   QUEUE_INIT(&stream->write_completed_queue);
   stream->write_queue_size = 0;
+
+  UVKCP_LOG("KCP stream initialized");
 }
 
 int kcp__stream_open(uvkcp_t* kcp, uv_os_sock_t fd, int flags) {
+    UVKCP_LOG_FUNC("Opening KCP stream with fd=%d", fd);
+
     uv_poll_t *poll = (uv_poll_t *)kcp;
 
     kcp->fd = fd;
@@ -80,17 +100,20 @@ int kcp__stream_open(uvkcp_t* kcp, uv_os_sock_t fd, int flags) {
     // init uv_poll_t
     if (uv_poll_init_socket(kcp->aloop, poll, fd) < 0)
     {
+        UVKCP_LOG_ERROR("Failed to initialize poll");
         return -1;
     }
 
     // start polling
     if (uv_poll_start(poll, UV_READABLE, kcp__stream_io) < 0)
     {
+        UVKCP_LOG_ERROR("Failed to start polling");
         return -1;
     }
 
     kcp->flags |= flags;
 
+    UVKCP_LOG("KCP stream opened successfully");
     return 0;
 }
 
@@ -259,7 +282,7 @@ static void kcp__write(uvkcp_t* stream) {
     for (it = 0; it < iovcnt; it ++) {
       size_t ilen = 0;
       while (ilen < iov[it].len) {
-        // Use KCP send function
+        // Use KCP send function - KCP handles fragmentation internally
         int rc = ikcp_send(ctx->kcp, ((char *)iov[it].base)+ilen, iov[it].len-ilen);
         if (rc < 0) {
           next = 0;
@@ -372,6 +395,10 @@ static void kcp__read_udp_data(uvkcp_t* stream) {
       break; // No more data or error
     }
 
+    // Track statistics
+    ctx->pktRecvTotal++;
+    ctx->bytesRecvTotal += nread;
+
     // Feed the raw UDP data to KCP
     int rc = ikcp_input(ctx->kcp, buffer, nread);
     if (rc < 0) {
@@ -422,26 +449,30 @@ static void kcp__read(uvkcp_t* stream) {
         if (nread < 0) {
         /* Error */
         if (nread == -1) {
-          /* Wait for the next one. */
-                stream->read_cb(stream, 0, &buf);
+          /* No data available, wait for next data */
+          stream->read_cb(stream, 0, &buf);
           return;
         } else if (nread == -2) {
-                // socket broken or invalid socket as EOF
-                stream->read_cb(stream, UV_EOF, &buf);
-            return;
+          /* Buffer too small, need larger buffer */
+          stream->read_cb(stream, UV_ENOBUFS, &buf);
+          return;
+        } else if (nread == -3) {
+          /* Invalid KCP state */
+          stream->read_cb(stream, UV_EIO, &buf);
+          return;
         } else {
-          /* Error. User should call uv_close(). */
-                stream->read_cb(stream, UV_EIO, &buf);
+          /* Other error */
+          stream->read_cb(stream, UV_EIO, &buf);
           return;
         }
       } else if (nread == 0) {
-        // never go here
-            stream->read_cb(stream, 0, &buf);
-            return;
-        } else {
+        // No data available
+        stream->read_cb(stream, 0, &buf);
+        return;
+      } else {
         /* Successful read */
         ssize_t buflen = buf.len;
-            stream->read_cb(stream, nread, &buf);
+        stream->read_cb(stream, nread, &buf);
 
         /* Return if we didn't fill the buffer, there is no more data to read. */
         if (nread < buflen) {
@@ -488,33 +519,37 @@ static void kcp__timer_cb(uv_timer_t* timer) {
     }
 
     IUINT32 current = uv_now(ctx->loop);
-    IUINT32 next_update = ikcp_check(ctx->kcp, current);
 
-    // If next_update is 0, we need to update immediately
-    if (next_update == 0) {
-        ikcp_update(ctx->kcp, current);
-        next_update = ikcp_check(ctx->kcp, current);
-    }
+    // Update KCP state
+    ikcp_update(ctx->kcp, current);
+
+    // Check when next update is needed
+    IUINT32 next_update = ikcp_check(ctx->kcp, current);
 
     // Reschedule timer for next update time
     if (next_update > 0) {
         uv_timer_start(&ctx->timer_handle, kcp__timer_cb, next_update, 0);
+        ctx->timer_active = 1;
     } else {
         ctx->timer_active = 0;
     }
 }
 
 void kcp__stream_io(uv_poll_t * handle, int status, int events) {
+    UVKCP_LOG_FUNC("Stream I/O: status=%d, events=%d", status, events);
+
     uvkcp_t *stream = (uvkcp_t *)handle;
 
     assert(handle->type == UV_POLL);
 
     kcp_context_t* ctx = kcp__get_context(stream);
     if (!ctx || !ctx->kcp) {
+        UVKCP_LOG_ERROR("Invalid context or KCP instance");
         return;
     }
 
     if (stream->connect_req) {
+      UVKCP_LOG("Processing connection request");
       kcp__stream_connect(stream);
     } else {
       // Start timer if not already active
@@ -522,12 +557,14 @@ void kcp__stream_io(uv_poll_t * handle, int status, int events) {
         IUINT32 current = uv_now(ctx->loop);
         IUINT32 next_update = ikcp_check(ctx->kcp, current);
         if (next_update == 0) {
+          // Update immediately and check again
           ikcp_update(ctx->kcp, current);
           next_update = ikcp_check(ctx->kcp, current);
         }
         if (next_update > 0) {
           uv_timer_start(&ctx->timer_handle, kcp__timer_cb, next_update, 0);
           ctx->timer_active = 1;
+          UVKCP_LOG("Started KCP timer, next update in %u ms", next_update);
         }
       }
 

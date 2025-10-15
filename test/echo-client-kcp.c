@@ -55,7 +55,7 @@ static void buf_alloc(uv_handle_t* udt, size_t size, uv_buf_t *buf) {
 }
 
 
-static void buf_free(uv_buf_t * buf) {
+static void buf_free(const uv_buf_t * buf) {
   buf_t* ab = (buf_t*) (buf->base - sizeof *ab);
 
   ab->next = buf_freelist;
@@ -66,7 +66,7 @@ static void buf_free(uv_buf_t * buf) {
 static void pinger_close_cb(uv_handle_t* handle) {
   pinger_t* pinger;
 
-  pinger = (pinger_t*)((uvkcp_t*)handle)->poll.data;
+  pinger = (pinger_t*)handle->data;
   printf("ping_pongs: %d roundtrips/s in ip%d\n", (1000 * pinger->pongs) / TIME, pinger->domain);
 
   free(pinger);
@@ -84,11 +84,11 @@ static void pinger_write_ping(pinger_t* pinger) {
   uvkcp_write_t* req;
   uv_buf_t buf;
 
-  buf.base = (char*)&PING;
+  buf.base = PING;
   buf.len = strlen(PING);
 
   req = malloc(sizeof *req);
-  if (uvkcp_write(req, (uvkcp_t*) &pinger->kcp, &buf, 1, pinger_write_cb)) {
+  if (uvkcp_write(req, &pinger->kcp, &buf, 1, pinger_write_cb)) {
     printf("uvkcp_write failed");
   }
 }
@@ -105,14 +105,16 @@ static void pinger_read_cb(uvkcp_t* kcp, ssize_t nread, const uv_buf_t * buf) {
   ssize_t i;
   pinger_t* pinger;
 
+  pinger = (pinger_t*)((uv_handle_t*)kcp)->data;
 
-  pinger = (pinger_t*)kcp->poll.data;
+  printf("[CLIENT] Read callback: nread=%zd\n", nread);
 
   if (nread < 0) {
     if (buf->base) {
       buf_free(buf);
     }
 
+    printf("[CLIENT] Read error: %zd\n", nread);
     assert(nread == UV_EOF);
 
     return;
@@ -124,10 +126,13 @@ static void pinger_read_cb(uvkcp_t* kcp, ssize_t nread, const uv_buf_t * buf) {
     pinger->state = (pinger->state + 1) % (sizeof(PING) - 1);
     if (pinger->state == 0) {
       pinger->pongs++;
+      printf("[CLIENT] Received PONG #%d\n", pinger->pongs);
       if (uv_now(loop) - start_time > TIME) {
+        printf("[CLIENT] Time expired, shutting down\n");
         uvkcp_shutdown(&pinger->shutdown_req, kcp, pinger_shutdown_cb);
         break;
       } else {
+        printf("[CLIENT] Writing next PING\n");
         pinger_write_ping(pinger);
       }
     }
@@ -138,16 +143,19 @@ static void pinger_read_cb(uvkcp_t* kcp, ssize_t nread, const uv_buf_t * buf) {
 
 
 static void pinger_connect_cb(uvkcp_connect_t* req, int status) {
-  pinger_t *pinger = (pinger_t*)req->handle->poll.data;
+  pinger_t *pinger = (pinger_t*)((uv_handle_t*)req->handle)->data;
 
-  printf("Connect success\n");
+  printf("[CLIENT] Connect callback: status=%d\n", status);
 
   assert(status == 0);
 
+  printf("[CLIENT] Writing initial PING\n");
   pinger_write_ping(pinger);
 
   if (uvkcp_read_start(req->handle, buf_alloc, pinger_read_cb)) {
-    printf("uvkcp_read_start failed");
+    printf("[CLIENT] uvkcp_read_start failed");
+  } else {
+    printf("[CLIENT] Started reading\n");
   }
 }
 
@@ -170,7 +178,8 @@ static void pinger_new(int port) {
   r = uvkcp_init(loop, &pinger->kcp);
   assert(!r);
 
-  pinger->kcp.poll.data = pinger;
+  // Set application data on the handle
+  ((uv_handle_t*)&pinger->kcp)->data = pinger;
 
   uvkcp_bind(&pinger->kcp, &client_addr, 1, 1);
 
@@ -197,7 +206,8 @@ static void pinger_new6(int port)
     r = uvkcp_init(loop, &pinger->kcp);
     assert(!r);
 
-    pinger->kcp.poll.data = pinger;
+    // Set application data on the handle
+    ((uv_handle_t*)&pinger->kcp)->data = pinger;
 
     uvkcp_bind(&pinger->kcp, &client_addr, 1, 1);
 
