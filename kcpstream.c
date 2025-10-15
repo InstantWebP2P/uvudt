@@ -526,33 +526,9 @@ static void kcp__server_io(uvkcp_t* stream) {
     // For KCP with TCP handshake, the server I/O processing is different:
     // - TCP connections are handled by the TCP server in uvkcp.c
     // - UDP data processing happens in the individual client streams
-    // - This function should only handle the server's own UDP socket for initial connection detection
+    // - The server doesn't have its own UDP socket - each client gets its own
 
-    // With TCP handshake, we don't need to detect new connections via UDP packets
-    // Connections are established through TCP handshake first, then KCP over UDP
-    // So we can simply read and discard any UDP packets that arrive on the server socket
-
-    char buffer[65536];
-    struct sockaddr_storage peer_addr;
-    socklen_t addr_len = sizeof(peer_addr);
-
-    // Read and discard any UDP packets on the server socket
-    // These might be from clients that didn't complete TCP handshake
-    int count = 32; // Prevent loop starvation
-    while (count-- > 0) {
-        ssize_t nread = recvfrom(ctx->udp_fd, buffer, sizeof(buffer), 0,
-                                (struct sockaddr*)&peer_addr, &addr_len);
-
-        if (nread <= 0) {
-            break; // No more data or error
-        }
-
-        // Track statistics
-        ctx->pktRecvTotal++;
-        ctx->bytesRecvTotal += nread;
-
-        UVKCP_LOG("Server received UDP packet from unhandled peer, discarding (TCP handshake required)");
-    }
+    UVKCP_LOG("Server I/O called - no UDP socket to process (TCP handshake only)");
 }
 
 void kcp__stream_io(uv_poll_t * handle, int status, int events) {
@@ -568,15 +544,16 @@ void kcp__stream_io(uv_poll_t * handle, int status, int events) {
         return;
     }
 
-    // Handle server mode
+    // Handle server mode - server doesn't have UDP socket, only TCP handshake
     if (ctx->is_listening && !ctx->is_connected) {
-        UVKCP_LOG("Processing server I/O");
+        UVKCP_LOG("Processing server I/O (TCP handshake only)");
         kcp__server_io(stream);
         return;
     }
 
-    if (!ctx->kcp) {
-        UVKCP_LOG_ERROR("Invalid KCP instance");
+    // Client connections must have UDP socket and KCP instance
+    if (!ctx->kcp || ctx->udp_fd == -1) {
+        UVKCP_LOG_ERROR("Invalid KCP instance or UDP socket");
         return;
     }
 

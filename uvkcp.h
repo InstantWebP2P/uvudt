@@ -75,7 +75,6 @@ struct kcp_context_s {
 
     // Conversation registry for shared socket multiplexing
     void *conv_registry;  // Hash table of conversation_id -> uvkcp_t*
-    int shared_udp_fd;    // Shared UDP socket for all connections
 
     // Performance tracking
     int64_t pktSentTotal;

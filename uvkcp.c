@@ -34,6 +34,8 @@ static int conv_exists_in_registry(kcp_context_t *ctx, uint32_t conv_id);
 
 // KCP output function - sends data over UDP
 static int kcp_output(const char *buf, int len, ikcpcb *kcp, void *user) {
+    UVKCP_LOG_FUNC("kcp_output enter ...");
+
     kcp_context_t *ctx = (kcp_context_t *)user;
 
     if (ctx->udp_fd == -1) {
@@ -63,6 +65,8 @@ static int kcp_output(const char *buf, int len, ikcpcb *kcp, void *user) {
     // Track statistics
     ctx->pktSentTotal++;
     ctx->bytesSentTotal += sent;
+
+    UVKCP_LOG_FUNC("kcp_output exit ...");
 
     // KCP expects 0 on success, not the number of bytes sent
     return 0;
@@ -115,7 +119,6 @@ int uvkcp_init(uv_loop_t *loop, uvkcp_t *handle) {
 
     // Initialize conversation registry
     ctx->conv_registry = NULL;
-    ctx->shared_udp_fd = -1;
 
     // Initialize timer handle
     if (uv_timer_init(loop, &ctx->timer_handle) < 0) {
@@ -191,7 +194,6 @@ int uvkcp_bind(uvkcp_t *handle, const struct sockaddr *addr, int reuseaddr, int 
 
     // UDP socket will be created later for each client connection
     ctx->udp_fd = -1;
-    ctx->shared_udp_fd = -1;
 
     UVKCP_LOG("KCP handle bound to TCP handshake socket, ready for listening");
     return 0;
