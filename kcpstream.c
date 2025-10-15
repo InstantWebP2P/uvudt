@@ -6,34 +6,13 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <string.h>
+#include <unistd.h>
 #include "kcp/ikcp.h"
 #include "uvkcp.h"
 
-// KCP context structure (same as in uvkcp.c)
-struct kcp_context_s {
-    ikcpcb *kcp;
-    uv_os_sock_t udp_fd;
-    struct sockaddr_storage peer_addr;
-    socklen_t peer_addr_len;
-    uv_loop_t *loop;
-    uv_poll_t poll_handle;
-    uv_timer_t timer_handle;
-    int is_connected;
-    int is_listening;
-    int timer_active;
 
-    // Performance tracking
-    int64_t pktSentTotal;
-    int64_t pktRecvTotal;
-    int pktSndLossTotal;
-    int pktRcvLossTotal;
-    int pktRetransTotal;
-    int64_t bytesSentTotal;
-    int64_t bytesRecvTotal;
-    IUINT32 lastUpdateTime;
-};
-
-typedef struct kcp_context_s kcp_context_t;
+// KCP output function declaration (implemented in uvkcp.c)
+extern int kcp_output(const char *buf, int len, ikcpcb *kcp, void *user);
 
 // Helper to get KCP context from uvkcp_t
 static kcp_context_t* kcp__get_context(uvkcp_t* stream) {
@@ -60,6 +39,7 @@ static void kcp__stream_connect(uvkcp_t *stream);
 static void kcp__write(uvkcp_t *stream);
 static void kcp__read(uvkcp_t *stream);
 static void kcp__timer_cb(uv_timer_t* timer);
+static void kcp__server_io(uvkcp_t *stream);
 void kcp__stream_io(uv_poll_t *handle, int status, int events);
 
 void kcp__stream_init(uv_loop_t* loop, uvkcp_t* stream) {
@@ -104,8 +84,8 @@ int kcp__stream_open(uvkcp_t* kcp, uv_os_sock_t fd, int flags) {
         return -1;
     }
 
-    // start polling
-    if (uv_poll_start(poll, UV_READABLE, kcp__stream_io) < 0)
+    // start polling for both readable and writable events
+    if (uv_poll_start(poll, UV_READABLE | UV_WRITABLE, kcp__stream_io) < 0)
     {
         UVKCP_LOG_ERROR("Failed to start polling");
         return -1;
@@ -520,7 +500,7 @@ static void kcp__timer_cb(uv_timer_t* timer) {
 
     IUINT32 current = uv_now(ctx->loop);
 
-    // Update KCP state
+    // Update KCP state - this will flush any pending output
     ikcp_update(ctx->kcp, current);
 
     // Check when next update is needed
@@ -530,8 +510,48 @@ static void kcp__timer_cb(uv_timer_t* timer) {
     if (next_update > 0) {
         uv_timer_start(&ctx->timer_handle, kcp__timer_cb, next_update, 0);
         ctx->timer_active = 1;
+        UVKCP_LOG("KCP timer rescheduled, next update in %u ms", next_update);
     } else {
         ctx->timer_active = 0;
+        UVKCP_LOG("KCP timer stopped, no more updates needed");
+    }
+}
+
+static void kcp__server_io(uvkcp_t* stream) {
+    kcp_context_t* ctx = kcp__get_context(stream);
+    if (!ctx || !ctx->is_listening) {
+        return;
+    }
+
+    // For KCP with TCP handshake, the server I/O processing is different:
+    // - TCP connections are handled by the TCP server in uvkcp.c
+    // - UDP data processing happens in the individual client streams
+    // - This function should only handle the server's own UDP socket for initial connection detection
+
+    // With TCP handshake, we don't need to detect new connections via UDP packets
+    // Connections are established through TCP handshake first, then KCP over UDP
+    // So we can simply read and discard any UDP packets that arrive on the server socket
+
+    char buffer[65536];
+    struct sockaddr_storage peer_addr;
+    socklen_t addr_len = sizeof(peer_addr);
+
+    // Read and discard any UDP packets on the server socket
+    // These might be from clients that didn't complete TCP handshake
+    int count = 32; // Prevent loop starvation
+    while (count-- > 0) {
+        ssize_t nread = recvfrom(ctx->udp_fd, buffer, sizeof(buffer), 0,
+                                (struct sockaddr*)&peer_addr, &addr_len);
+
+        if (nread <= 0) {
+            break; // No more data or error
+        }
+
+        // Track statistics
+        ctx->pktRecvTotal++;
+        ctx->bytesRecvTotal += nread;
+
+        UVKCP_LOG("Server received UDP packet from unhandled peer, discarding (TCP handshake required)");
     }
 }
 
@@ -543,8 +563,20 @@ void kcp__stream_io(uv_poll_t * handle, int status, int events) {
     assert(handle->type == UV_POLL);
 
     kcp_context_t* ctx = kcp__get_context(stream);
-    if (!ctx || !ctx->kcp) {
-        UVKCP_LOG_ERROR("Invalid context or KCP instance");
+    if (!ctx) {
+        UVKCP_LOG_ERROR("Invalid context");
+        return;
+    }
+
+    // Handle server mode
+    if (ctx->is_listening && !ctx->is_connected) {
+        UVKCP_LOG("Processing server I/O");
+        kcp__server_io(stream);
+        return;
+    }
+
+    if (!ctx->kcp) {
+        UVKCP_LOG_ERROR("Invalid KCP instance");
         return;
     }
 
@@ -568,12 +600,25 @@ void kcp__stream_io(uv_poll_t * handle, int status, int events) {
         }
       }
 
-      // Check for data to read
-      kcp__read(stream);
+      // Process readable events - always try to read UDP data first
+      if (events & UV_READABLE) {
+        kcp__read(stream);
+      }
 
-      // Check for data to write
-      kcp__write(stream);
-      kcp__write_callbacks(stream);
+      // Process writable events - try to write queued data
+      if (events & UV_WRITABLE) {
+        kcp__write(stream);
+        kcp__write_callbacks(stream);
+      }
+
+      // Update KCP to flush any pending output, but only if we have data to send
+      // This is more efficient than always calling ikcp_update()
+      IUINT32 current = uv_now(ctx->loop);
+      IUINT32 next_update = ikcp_check(ctx->kcp, current);
+      if (next_update == 0) {
+        // KCP has work to do immediately
+        ikcp_update(ctx->kcp, current);
+      }
     }
 }
 
@@ -804,16 +849,76 @@ size_t uvkcp_get_write_queue_size(const uvkcp_t* stream) {
 }
 
 int uvkcp_accept(uvkcp_t* server, uvkcp_t* client) {
-  /* KCP is a connectionless protocol over UDP, so accept is essentially a no-op.
-   * The "connection" is established when data is exchanged.
-   * This function just verifies both handles are using the same loop.
-   */
-  assert(server->aloop == client->aloop);
+  kcp_context_t* server_ctx = kcp__get_context(server);
+  kcp_context_t* client_ctx = kcp__get_context(client);
 
-  /* For KCP, we don't need to transfer any file descriptors or connection state
-   * since it's connectionless. The client handle should already be properly
-   * initialized and ready to use.
-   */
+  if (!server_ctx || !client_ctx) {
+    return UV_EINVAL;
+  }
 
+  if (!server_ctx->is_listening) {
+    return UV_EINVAL;
+  }
+
+  if (client_ctx->is_connected || client_ctx->is_listening) {
+    return UV_EISCONN;
+  }
+
+  // For KCP over UDP, each client connection uses a separate UDP socket
+  // Create a new UDP socket for this client connection
+  int domain = (server_ctx->server_addr.ss_family == AF_INET) ? AF_INET : AF_INET6;
+  int sock = socket(domain, SOCK_DGRAM, 0);
+  if (sock < 0) {
+    UVKCP_LOG_ERROR("Failed to create UDP socket for client: %s", strerror(errno));
+    return uv_translate_sys_error(errno);
+  }
+
+  // Bind the client socket to the same address family as the server
+  // Use port 0 to let the OS assign an available port
+  struct sockaddr_storage client_addr;
+  socklen_t client_addr_len = sizeof(client_addr);
+  memset(&client_addr, 0, sizeof(client_addr));
+
+  if (domain == AF_INET) {
+    struct sockaddr_in *addr_in = (struct sockaddr_in*)&client_addr;
+    addr_in->sin_family = AF_INET;
+    addr_in->sin_addr.s_addr = INADDR_ANY;
+    addr_in->sin_port = 0; // Let OS assign port
+    client_addr_len = sizeof(struct sockaddr_in);
+  } else {
+    struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6*)&client_addr;
+    addr_in6->sin6_family = AF_INET6;
+    addr_in6->sin6_addr = in6addr_any;
+    addr_in6->sin6_port = 0; // Let OS assign port
+    client_addr_len = sizeof(struct sockaddr_in6);
+  }
+
+  if (bind(sock, (struct sockaddr*)&client_addr, client_addr_len) < 0) {
+    UVKCP_LOG_ERROR("Failed to bind client UDP socket: %s", strerror(errno));
+    close(sock);
+    return uv_translate_sys_error(errno);
+  }
+
+  client_ctx->udp_fd = sock;
+
+  // Copy the peer address from server context (set by kcp__server_io)
+  memcpy(&client_ctx->peer_addr, &server_ctx->peer_addr, sizeof(server_ctx->peer_addr));
+  client_ctx->peer_addr_len = server_ctx->peer_addr_len;
+
+  // KCP instance creation deferred until TCP handshake completes
+  // TCP handshake required to exchange conversation ID and peer address
+  client_ctx->kcp = NULL;
+  client_ctx->is_connected = 0;
+
+  // Open the stream using the client's dedicated UDP socket
+  if (kcp__stream_open(client, sock, UVKCP_FLAG_READABLE | UVKCP_FLAG_WRITABLE) < 0) {
+    UVKCP_LOG_ERROR("Failed to open client stream");
+    close(sock);
+    ikcp_release(client_ctx->kcp);
+    client_ctx->kcp = NULL;
+    return UV_EIO;
+  }
+
+  UVKCP_LOG("Accepted KCP client connection on dedicated fd=%d (TCP handshake required)", sock);
   return 0;
 }

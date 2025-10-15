@@ -11,6 +11,7 @@ extern "C" {
 
 #include "uv.h"
 #include "queue.h"
+#include "kcp/ikcp.h"
 #include <stdio.h>
 
 // Debug logging
@@ -39,6 +40,88 @@ typedef void (* uvkcp_shutdown_cb)(struct uvkcp_shutdown_s *req, int status);
 typedef void (* uvkcp_write_cb)(struct uvkcp_write_s *req, int status);
 typedef void (* uvkcp_read_cb)(struct uvkcp_s *stream, ssize_t nread, const uv_buf_t *buf);
 typedef void (* uvkcp_connection_cb)(struct uvkcp_s *server, int status);
+
+// Forward declaration for KCP context
+struct kcp_context_s;
+typedef struct kcp_context_s kcp_context_t;
+
+// KCP context structure
+struct kcp_context_s {
+    ikcpcb *kcp;
+    uv_os_sock_t udp_fd;
+    struct sockaddr_storage peer_addr;
+    socklen_t peer_addr_len;
+    uv_loop_t *loop;
+    uv_poll_t poll_handle;
+    uv_timer_t timer_handle;
+    int is_connected;
+    int is_listening;
+    int timer_active;
+
+    // Server-specific fields
+    int backlog;
+    uvkcp_connection_cb connection_cb;
+    struct sockaddr_storage server_addr;
+    socklen_t server_addr_len;
+
+    // TCP handshake support (mandatory)
+    uv_tcp_t tcp_server;
+    uv_tcp_t tcp_client;
+    uint32_t next_conv;
+    struct uvkcp_connect_s *pending_connect_req;
+
+    // Server reference for client connections (for registry cleanup)
+    kcp_context_t *server_ctx;
+
+    // Conversation registry for shared socket multiplexing
+    void *conv_registry;  // Hash table of conversation_id -> uvkcp_t*
+    int shared_udp_fd;    // Shared UDP socket for all connections
+
+    // Performance tracking
+    int64_t pktSentTotal;
+    int64_t pktRecvTotal;
+    int pktSndLossTotal;
+    int pktRcvLossTotal;
+    int pktRetransTotal;
+    int64_t bytesSentTotal;
+    int64_t bytesRecvTotal;
+    IUINT32 lastUpdateTime;
+};
+
+// KCP handshake protocol structures
+struct kcp_handshake_s {
+    uint32_t conv;           // KCP conversation ID (0 = request new)
+    uint16_t udp_port;       // UDP port for KCP communication
+    uint8_t  addr_family;    // Address family (AF_INET or AF_INET6)
+    uint8_t  peer_addr[16];  // Peer IP address for UDP communication
+    uint32_t timestamp;      // Timestamp for handshake
+    uint32_t nonce;          // Random nonce for security
+    uint32_t flags;          // Handshake flags
+};
+
+typedef struct kcp_handshake_s kcp_handshake_t;
+
+// KCP server context for TCP handshake
+struct kcp_server_ctx_s {
+    uv_tcp_t tcp_server;     // TCP server for handshake
+    uv_loop_t *loop;
+    uvkcp_connection_cb connection_cb;
+    int backlog;
+    uint32_t next_conv;      // Next conversation ID to assign
+};
+
+typedef struct kcp_server_ctx_s kcp_server_ctx_t;
+
+// KCP client context for TCP handshake
+struct kcp_client_ctx_s {
+    uv_tcp_t tcp_client;     // TCP client for handshake
+    uv_loop_t *loop;
+    uvkcp_connect_cb connect_cb;
+    struct uvkcp_connect_s *connect_req;
+    uint32_t conv;           // Assigned conversation ID
+};
+
+typedef struct kcp_client_ctx_s kcp_client_ctx_t;
 
 // state flags
 enum uvkcp_flags_e
@@ -178,19 +261,14 @@ UV_EXTERN int uvkcp_connect(uvkcp_connect_t *req,
                             const struct sockaddr *addr, 
                             uvkcp_connect_cb cb);
 
-UV_EXTERN int uvkcp_punchhole(uvkcp_t *handle, 
-                              const struct sockaddr *addr, 
-                              int from, 
-                              int to);
-
 UV_EXTERN int uvkcp_shutdown(uvkcp_shutdown_t *req,
                              uvkcp_t *handle,
                              uvkcp_shutdown_cb cb);
 
 UV_EXTERN size_t uvkcp_get_write_queue_size(const uvkcp_t *stream);
 
-UV_EXTERN int uvkcp_listen(uvkcp_t *stream, 
-                           int backlog, 
+UV_EXTERN int uvkcp_listen(uvkcp_t *stream,
+                           int backlog,
                            uvkcp_connection_cb cb);
 
 UV_EXTERN int uvkcp_accept(uvkcp_t *server, uvkcp_t *client);
@@ -214,8 +292,8 @@ UV_EXTERN int uvkcp_write2(uvkcp_write_t* req,
                            uv_stream_t* send_handle, // !!! not used, for compatibility with Node.js
                            uvkcp_write_cb cb);
 
-UV_EXTERN int uvkcp_try_write(uvkcp_t *handle, 
-                              const uv_buf_t bufs[], 
+UV_EXTERN int uvkcp_try_write(uvkcp_t *handle,
+                              const uv_buf_t bufs[],
                               unsigned int nbufs);
 
 UV_EXTERN int uvkcp_is_readable(uvkcp_t *handle);
@@ -224,38 +302,6 @@ UV_EXTERN int uvkcp_is_writable(uvkcp_t *handle);
 
 UV_EXTERN int uvkcp_set_blocking(uvkcp_t *handle, int blocking);
 
-// set KCP socket qos/priority
-UV_EXTERN int uvkcp_setqos(uvkcp_t *handle, int qos);
-
-// set KCP socket maxim bandwidth bytes/second
-UV_EXTERN int uvkcp_setmbw(uvkcp_t *handle, int64_t mbw);
-
-// set KCP socket maxim buffer size
-UV_EXTERN int uvkcp_setmbs(uvkcp_t *handle, 
-                           int mfc, 
-                           int mkcp, 
-                           int mudp);
-
-// set KCP socket security mode
-UV_EXTERN int uvkcp_setsec(uvkcp_t *handle, 
-                           int mode, 
-                           unsigned char keybuf[], 
-                           int keylen);
-
-// binding kcp socket on existing udp socket/fd
-UV_EXTERN int uvkcp_bindfd(uvkcp_t *handle, 
-                           uv_os_sock_t udpfd, 
-                           int reuseaddr, 
-                           int reuseable);
-
-// retrieve udp socket/fd associated with kcp socket
-UV_EXTERN int uvkcp_udpfd(uvkcp_t *handle, uv_os_sock_t *udpfd);
-
-// set if REUSE existing ADDRESS created by previous kcp socket
-UV_EXTERN int uvkcp_reuseaddr(uvkcp_t *handle, int yes);
-
-// set if ADDRESS reusable for another kcp socket
-UV_EXTERN int uvkcp_reuseable(uvkcp_t *handle, int yes);
 
 // KCP network performance track
 typedef struct uvkcp_netperf_s

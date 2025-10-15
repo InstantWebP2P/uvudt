@@ -99,33 +99,29 @@ static void echo_alloc(uv_handle_t* handle,
 }
 
 
-static void on_connection(uvkcp_t* server, int status) {
-  uvkcp_t* stream;
+static void on_connection(uvkcp_t* client, int status) {
   int r;
 
   printf("[SERVER] Connection callback: status=%d\n", status);
 
   if (status != 0) {
     fprintf(stderr, "[SERVER] Connect error %s\n", uv_err_name(status));
-  } else printf("[SERVER] Connect success\n");
-  assert(status == 0);
+    return;
+  } else {
+    printf("[SERVER] Connect success\n");
+  }
 
-    stream = malloc(sizeof(uvkcp_t));
-    assert(stream != NULL);
-    r = uvkcp_init(loop, stream);
-    assert(r == 0);
+  // With TCP handshake, the client stream is already fully connected
+  // and ready for reading/writing. No need for uvkcp_accept.
+  // The client parameter is the fully connected KCP stream.
 
-  /* associate server with stream */
-  ((uv_handle_t*)stream)->data = server;
+  r = uvkcp_read_start(client, echo_alloc, after_read);
 
-  r = uvkcp_accept(server, stream);
-  assert(r == 0);
-
-  ///r = uvkcp_read_start(stream, echo_alloc, after_read);
-  r = uvkcp_read_start(server, echo_alloc, after_read);
-
-  printf("[SERVER] Started reading on accepted stream\n");
-  assert(r == 0);
+  printf("[SERVER] Started reading on accepted stream, result=%d\n", r);
+  if (r != 0) {
+    fprintf(stderr, "[SERVER] uvkcp_read_start failed: %d\n", r);
+    return;
+  }
 }
 
 
@@ -201,12 +197,21 @@ static int kcp6_echo_start(int port) {
 int main(int argc, char *argv[]) {
   loop = uv_default_loop();
 
-  if (kcp4_echo_start(TEST_PORT))
+  int port = TEST_PORT;
+  if (argc > 1) {
+    port = atoi(argv[1]);
+  }
+
+  printf("[SERVER] Starting KCP echo server on port %d\n", port);
+
+  if (kcp4_echo_start(port))
     return 1;
 
-  if (kcp6_echo_start(TEST_PORT))
+  if (kcp6_echo_start(port))
     return 1;
 
+  printf("[SERVER] Server started successfully, running event loop...\n");
   uv_run(loop, UV_RUN_DEFAULT);
+  printf("[SERVER] Event loop finished\n");
   return 0;
 }

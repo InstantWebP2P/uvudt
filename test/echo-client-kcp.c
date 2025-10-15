@@ -181,9 +181,8 @@ static void pinger_new(int port) {
   // Set application data on the handle
   ((uv_handle_t*)&pinger->kcp)->data = pinger;
 
-  uvkcp_bind(&pinger->kcp, &client_addr, 1, 1);
-
-  r = uvkcp_connect(&pinger->connect_req, &pinger->kcp, &server_addr, pinger_connect_cb);
+  // Client doesn't need to bind - just connect
+  r = uvkcp_connect(&pinger->connect_req, &pinger->kcp, (const struct sockaddr*)&server_addr, pinger_connect_cb);
   assert(!r);
 }
 
@@ -209,9 +208,8 @@ static void pinger_new6(int port)
     // Set application data on the handle
     ((uv_handle_t*)&pinger->kcp)->data = pinger;
 
-    uvkcp_bind(&pinger->kcp, &client_addr, 1, 1);
-
-    r = uvkcp_connect(&pinger->connect_req, &pinger->kcp, &server_addr, pinger_connect_cb);
+    // Client doesn't need to bind - just connect
+    r = uvkcp_connect(&pinger->connect_req, &pinger->kcp, (const struct sockaddr*)&server_addr, pinger_connect_cb);
     assert(!r);
 }
 
