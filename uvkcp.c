@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include "kcp/ikcp.h"
 #include "uvkcp.h"
 
@@ -657,6 +658,23 @@ static uint32_t generate_nonce(void) {
     return (uint32_t)rand();
 }
 
+// Helper function to set socket to non-blocking mode
+static int set_socket_nonblocking(int sock) {
+    int flags = fcntl(sock, F_GETFL, 0);
+    if (flags == -1) {
+        UVKCP_LOG_ERROR("Failed to get socket flags: %s", strerror(errno));
+        return -1;
+    }
+
+    if (fcntl(sock, F_SETFL, flags | O_NONBLOCK) == -1) {
+        UVKCP_LOG_ERROR("Failed to set socket non-blocking: %s", strerror(errno));
+        return -1;
+    }
+
+    UVKCP_LOG("Set socket %d to non-blocking mode", sock);
+    return 0;
+}
+
 // Simple alloc function for TCP handshake
 static void echo_alloc(uv_handle_t* handle, size_t suggested_size, uv_buf_t* buf) {
     buf->base = malloc(suggested_size);
@@ -768,6 +786,15 @@ static void tcp_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread, const 
                         int domain = (handshake->addr_family == AF_INET) ? AF_INET : AF_INET6;
                         int sock = socket(domain, SOCK_DGRAM, 0);
                         if (sock >= 0) {
+                            // Set socket to non-blocking mode for libuv integration
+                            if (set_socket_nonblocking(sock) != 0) {
+                                UVKCP_LOG_ERROR("Failed to set server UDP socket non-blocking");
+                                close(sock);
+                                ctx->is_connected = 0; // Reset connection state on failure
+                                // Call connection callback with error
+                                kcp_server->connection_cb(NULL, uv_translate_sys_error(errno));
+                                goto cleanup_handshake;
+                            }
                             ctx->udp_fd = sock;
 
                             // Create KCP instance with assigned conversation ID
@@ -856,6 +883,7 @@ static void tcp_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread, const 
         UVKCP_LOG_ERROR("Invalid handshake size: %zd", nread);
     }
 
+cleanup_handshake:
     free(buf->base);
 }
 
@@ -900,6 +928,17 @@ static void tcp_connect_cb(uv_connect_t *req, int status) {
     int domain = (ctx->server_addr.ss_family == AF_INET) ? AF_INET : AF_INET6;
     int sock = socket(domain, SOCK_DGRAM, 0);
     if (sock >= 0) {
+        // Set socket to non-blocking mode for libuv integration
+        if (set_socket_nonblocking(sock) != 0) {
+            UVKCP_LOG_ERROR("Failed to set client UDP socket non-blocking");
+            close(sock);
+            if (ctx->pending_connect_req && ctx->pending_connect_req->cb) {
+                ctx->pending_connect_req->cb(ctx->pending_connect_req, uv_translate_sys_error(errno));
+            }
+            ctx->pending_connect_req = NULL;
+            free(req);
+            return;
+        }
         ctx->udp_fd = sock;
 
         // Get client's UDP socket address for proper peer communication
