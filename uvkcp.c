@@ -786,6 +786,34 @@ static void tcp_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread, const 
                         int domain = (handshake->addr_family == AF_INET) ? AF_INET : AF_INET6;
                         int sock = socket(domain, SOCK_DGRAM, 0);
                         if (sock >= 0) {
+                            // Bind the server socket to any available port
+                            struct sockaddr_storage bind_addr;
+                            socklen_t bind_addr_len = sizeof(bind_addr);
+                            memset(&bind_addr, 0, sizeof(bind_addr));
+
+                            if (domain == AF_INET) {
+                                struct sockaddr_in *addr_in = (struct sockaddr_in*)&bind_addr;
+                                addr_in->sin_family = AF_INET;
+                                addr_in->sin_addr.s_addr = INADDR_ANY;
+                                addr_in->sin_port = 0; // Let OS assign port
+                                bind_addr_len = sizeof(struct sockaddr_in);
+                            } else {
+                                struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6*)&bind_addr;
+                                addr_in6->sin6_family = AF_INET6;
+                                addr_in6->sin6_addr = in6addr_any;
+                                addr_in6->sin6_port = 0; // Let OS assign port
+                                bind_addr_len = sizeof(struct sockaddr_in6);
+                            }
+
+                            if (bind(sock, (struct sockaddr*)&bind_addr, bind_addr_len) < 0) {
+                                UVKCP_LOG_ERROR("Failed to bind server UDP socket: %s", strerror(errno));
+                                close(sock);
+                                ctx->is_connected = 0; // Reset connection state on failure
+                                // Call connection callback with error
+                                kcp_server->connection_cb(NULL, uv_translate_sys_error(errno));
+                                goto cleanup_handshake;
+                            }
+
                             // Set socket to non-blocking mode for libuv integration
                             if (set_socket_nonblocking(sock) != 0) {
                                 UVKCP_LOG_ERROR("Failed to set server UDP socket non-blocking");
@@ -908,10 +936,17 @@ static void tcp_handshake_write_cb(uv_write_t *req, int status) {
 static void tcp_connect_cb(uv_connect_t *req, int status) {
     kcp_context_t *ctx = (kcp_context_t *)req->data;
 
+    UVKCP_LOG_FUNC("tcp_connect_cb: TCP connection status=%d", status);
+
     if (status != 0) {
         UVKCP_LOG_ERROR("TCP connect error: %d", status);
         if (ctx->pending_connect_req && ctx->pending_connect_req->cb) {
+            UVKCP_LOG("tcp_connect_cb: Calling connect callback with error status=%d", status);
             ctx->pending_connect_req->cb(ctx->pending_connect_req, status);
+        }
+        // Clear both context and stream connect requests
+        if (ctx->pending_connect_req) {
+            ctx->pending_connect_req->handle->connect_req = NULL;
         }
         ctx->pending_connect_req = NULL;
         free(req);
@@ -928,12 +963,50 @@ static void tcp_connect_cb(uv_connect_t *req, int status) {
     int domain = (ctx->server_addr.ss_family == AF_INET) ? AF_INET : AF_INET6;
     int sock = socket(domain, SOCK_DGRAM, 0);
     if (sock >= 0) {
+        // Bind the client socket to any available port
+        struct sockaddr_storage bind_addr;
+        socklen_t bind_addr_len = sizeof(bind_addr);
+        memset(&bind_addr, 0, sizeof(bind_addr));
+
+        if (domain == AF_INET) {
+            struct sockaddr_in *addr_in = (struct sockaddr_in*)&bind_addr;
+            addr_in->sin_family = AF_INET;
+            addr_in->sin_addr.s_addr = INADDR_ANY;
+            addr_in->sin_port = 0; // Let OS assign port
+            bind_addr_len = sizeof(struct sockaddr_in);
+        } else {
+            struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6*)&bind_addr;
+            addr_in6->sin6_family = AF_INET6;
+            addr_in6->sin6_addr = in6addr_any;
+            addr_in6->sin6_port = 0; // Let OS assign port
+            bind_addr_len = sizeof(struct sockaddr_in6);
+        }
+
+        if (bind(sock, (struct sockaddr*)&bind_addr, bind_addr_len) < 0) {
+            UVKCP_LOG_ERROR("Failed to bind client UDP socket: %s", strerror(errno));
+            close(sock);
+            if (ctx->pending_connect_req && ctx->pending_connect_req->cb) {
+                ctx->pending_connect_req->cb(ctx->pending_connect_req, uv_translate_sys_error(errno));
+            }
+            // Clear both context and stream connect requests
+            if (ctx->pending_connect_req) {
+                ctx->pending_connect_req->handle->connect_req = NULL;
+            }
+            ctx->pending_connect_req = NULL;
+            free(req);
+            return;
+        }
+
         // Set socket to non-blocking mode for libuv integration
         if (set_socket_nonblocking(sock) != 0) {
             UVKCP_LOG_ERROR("Failed to set client UDP socket non-blocking");
             close(sock);
             if (ctx->pending_connect_req && ctx->pending_connect_req->cb) {
                 ctx->pending_connect_req->cb(ctx->pending_connect_req, uv_translate_sys_error(errno));
+            }
+            // Clear both context and stream connect requests
+            if (ctx->pending_connect_req) {
+                ctx->pending_connect_req->handle->connect_req = NULL;
             }
             ctx->pending_connect_req = NULL;
             free(req);
@@ -1008,6 +1081,10 @@ static void tcp_client_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread,
         if (ctx->pending_connect_req && ctx->pending_connect_req->cb) {
             ctx->pending_connect_req->cb(ctx->pending_connect_req, nread);
         }
+        // Clear both context and stream connect requests
+        if (ctx->pending_connect_req) {
+            ctx->pending_connect_req->handle->connect_req = NULL;
+        }
         ctx->pending_connect_req = NULL;
         free(buf->base);
         uv_close((uv_handle_t *)tcp_client, NULL);
@@ -1023,12 +1100,16 @@ static void tcp_client_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread,
         // Create KCP object with exchanged conversation ID
         uvkcp_t *client = ctx->pending_connect_req->handle;
 
+        UVKCP_LOG("tcp_client_handshake_read_cb: Creating KCP instance with conv=%u", conv);
+
         if (ctx) {
             // Use the UDP socket already created in TCP connect callback
             if (ctx->udp_fd >= 0) {
+                UVKCP_LOG("tcp_client_handshake_read_cb: Using UDP socket fd=%d", ctx->udp_fd);
                 // Create KCP instance with exchanged conversation ID
                 ctx->kcp = ikcp_create(conv, ctx);
                 if (ctx->kcp) {
+                    UVKCP_LOG("tcp_client_handshake_read_cb: KCP instance created successfully");
                     // Configure KCP
                     ikcp_setoutput(ctx->kcp, kcp_output);
                     ikcp_nodelay(ctx->kcp, 1, 10, 2, 1);
@@ -1042,16 +1123,19 @@ static void tcp_client_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread,
                         peer->sin_port = handshake->udp_port;
                         memcpy(&peer->sin_addr, handshake->peer_addr, 4);
                         ctx->peer_addr_len = sizeof(struct sockaddr_in);
+                        UVKCP_LOG("tcp_client_handshake_read_cb: Set IPv4 peer address");
                     } else {
                         struct sockaddr_in6 *peer = (struct sockaddr_in6 *)&ctx->peer_addr;
                         peer->sin6_family = AF_INET6;
                         peer->sin6_port = handshake->udp_port;
                         memcpy(&peer->sin6_addr, handshake->peer_addr, 16);
                         ctx->peer_addr_len = sizeof(struct sockaddr_in6);
+                        UVKCP_LOG("tcp_client_handshake_read_cb: Set IPv6 peer address");
                     }
 
                     // Mark as connected
                     ctx->is_connected = 1;
+                    UVKCP_LOG("tcp_client_handshake_read_cb: Marked connection as established (is_connected=1)");
 
                     // Open the KCP stream
                     if (kcp__stream_open(client, ctx->udp_fd, UVKCP_FLAG_READABLE | UVKCP_FLAG_WRITABLE) == 0) {
@@ -1090,11 +1174,19 @@ static void tcp_client_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread,
             }
         }
 
+        // Clear both context and stream connect requests
+        if (ctx->pending_connect_req) {
+            ctx->pending_connect_req->handle->connect_req = NULL;
+        }
         ctx->pending_connect_req = NULL;
     } else {
         UVKCP_LOG_ERROR("Invalid handshake response size: %zd", nread);
         if (ctx->pending_connect_req && ctx->pending_connect_req->cb) {
             ctx->pending_connect_req->cb(ctx->pending_connect_req, UV_EINVAL);
+        }
+        // Clear both context and stream connect requests
+        if (ctx->pending_connect_req) {
+            ctx->pending_connect_req->handle->connect_req = NULL;
         }
         uv_close((uv_handle_t *)tcp_client, NULL);
         ctx->pending_connect_req = NULL;

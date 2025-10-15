@@ -203,6 +203,8 @@ static size_t kcp__write_req_size(uvkcp_write_t* req) {
 static void kcp__write_req_finish(uvkcp_write_t* req) {
   uvkcp_t* stream = req->handle;
 
+  UVKCP_LOG_FUNC("kcp__write_req_finish: Completing write request");
+
   /* Pop the req off tcp->write_queue. */
   QUEUE_REMOVE(&req->queue);
   if (req->bufs != req->bufsml) {
@@ -214,6 +216,8 @@ static void kcp__write_req_finish(uvkcp_write_t* req) {
    * callback called in the near future.
    */
   QUEUE_INSERT_TAIL(&stream->write_completed_queue, &req->queue);
+
+  UVKCP_LOG("kcp__write_req_finish: Write request moved to completed queue");
 
   // KCP always polling on read event
   /// kcp__io_feed(kcp->loop, &stream->write_watcher, UV__IO_READ);
@@ -230,17 +234,20 @@ static void kcp__write(uvkcp_t* stream) {
   int iovcnt;
   ssize_t n;
 
+  UVKCP_LOG_FUNC("kcp__write: Processing write request");
 
   if ((stream->flags & UVKCP_FLAG_CLOSING) ||
       (stream->flags & UVKCP_FLAG_CLOSED)) {
     /* Handle was closed this tick. We've received a stale
      * 'is writable' callback from the event loop, ignore.
      */
+    UVKCP_LOG("kcp__write: Stream is closing/closed, ignoring write");
     return;
   }
 
   kcp_context_t* ctx = kcp__get_context(stream);
   if (!ctx || !ctx->kcp) {
+    UVKCP_LOG_ERROR("kcp__write: Invalid KCP context or KCP instance");
     return;
   }
 
@@ -248,6 +255,7 @@ static void kcp__write(uvkcp_t* stream) {
   req = uvkcp_write_queue_head(stream);
   if (!req) {
     assert(stream->write_queue_size == 0);
+    UVKCP_LOG("kcp__write: No write requests in queue");
     return;
   }
 
@@ -256,21 +264,30 @@ static void kcp__write(uvkcp_t* stream) {
   iov = &(req->bufs[req->write_index]);
   iovcnt = req->nbufs - req->write_index;
 
+  UVKCP_LOG("kcp__write: Processing request with iovcnt=%d, write_index=%u, total_bufs=%u",
+            iovcnt, req->write_index, req->nbufs);
+
   {
     int next = 1, it = 0;
     n = -1;
     for (it = 0; it < iovcnt; it ++) {
       size_t ilen = 0;
+      UVKCP_LOG("kcp__write: Processing buffer %d, length=%zu", it, iov[it].len);
       while (ilen < iov[it].len) {
         // Use KCP send function - KCP handles fragmentation internally
         int rc = ikcp_send(ctx->kcp, ((char *)iov[it].base)+ilen, iov[it].len-ilen);
+        UVKCP_LOG("kcp__write: ikcp_send returned %d for buffer %d (offset=%zu, remaining=%zu)",
+                  rc, it, ilen, iov[it].len-ilen);
         if (rc < 0) {
+          UVKCP_LOG_ERROR("kcp__write: KCP send failed with error %d", rc);
           next = 0;
           break;
         } else  {
           if (n == -1) n = 0;
           n += (iov[it].len - ilen);
           ilen = iov[it].len; // KCP sends entire buffer
+          UVKCP_LOG("kcp__write: Successfully sent %zu bytes from buffer %d",
+                    iov[it].len - ilen, it);
         }
       }
       if (next == 0) break;
@@ -279,12 +296,14 @@ static void kcp__write(uvkcp_t* stream) {
 
   if (n < 0) {
       /* Error */
+      UVKCP_LOG_ERROR("kcp__write: Write failed, total_bytes=%zd", n);
       req->error = UV_EIO;
       stream->write_queue_size -= kcp__write_req_size(req);
       kcp__write_req_finish(req);
       return;
   } else {
     /* Successful write */
+    UVKCP_LOG("kcp__write: Successfully wrote %zd bytes", n);
 
     /* Update the counters. */
     while (n >= 0) {
@@ -294,6 +313,8 @@ static void kcp__write(uvkcp_t* stream) {
       assert(req->write_index < req->nbufs);
 
       if ((size_t)n < len) {
+        UVKCP_LOG("kcp__write: Partial write - wrote %zu of %zu bytes from buffer %u",
+                  (size_t)n, len, req->write_index);
         buf->base += n;
         buf->len -= n;
         stream->write_queue_size -= n;
@@ -303,6 +324,7 @@ static void kcp__write(uvkcp_t* stream) {
         break;
       } else {
         /* Finished writing the buf at index req->write_index. */
+        UVKCP_LOG("kcp__write: Completed buffer %u (%zu bytes)", req->write_index, len);
         req->write_index++;
 
         assert((size_t)n >= len);
@@ -314,6 +336,7 @@ static void kcp__write(uvkcp_t* stream) {
         if (req->write_index == req->nbufs) {
           /* Then we're done! */
           assert(n == 0);
+          UVKCP_LOG("kcp__write: Completed all buffers in request");
           kcp__write_req_finish(req);
           /* TODO: start trying to write the next request. */
           return;
@@ -325,6 +348,7 @@ static void kcp__write(uvkcp_t* stream) {
   /* Either we've counted n down to zero or we've got EAGAIN. */
   assert(n == 0 || n == -1);
 
+  UVKCP_LOG("kcp__write: Write operation completed, remaining_bytes=%zd", n);
   /* We're not done. */
 
 }
@@ -358,6 +382,7 @@ static void kcp__write_callbacks(uvkcp_t* stream) {
 static void kcp__read_udp_data(uvkcp_t* stream) {
   kcp_context_t* ctx = kcp__get_context(stream);
   if (!ctx || !ctx->kcp || ctx->udp_fd == -1) {
+    UVKCP_LOG("kcp__read_udp_data: Invalid context or UDP socket");
     return;
   }
 
@@ -366,14 +391,28 @@ static void kcp__read_udp_data(uvkcp_t* stream) {
   socklen_t addr_len = sizeof(peer_addr);
 
   int count = 32; // Prevent loop starvation
+  int packets_read = 0;
+  int total_bytes = 0;
+
+  UVKCP_LOG_FUNC("kcp__read_udp_data: Starting UDP data read loop");
 
   while (count-- > 0) {
     ssize_t nread = recvfrom(ctx->udp_fd, buffer, sizeof(buffer), 0,
                             (struct sockaddr*)&peer_addr, &addr_len);
 
     if (nread <= 0) {
+      if (nread < 0) {
+        UVKCP_LOG("kcp__read_udp_data: recvfrom error: %s (errno=%d)", strerror(errno), errno);
+      } else {
+        UVKCP_LOG("kcp__read_udp_data: No more data available");
+      }
       break; // No more data or error
     }
+
+    packets_read++;
+    total_bytes += nread;
+
+    UVKCP_LOG("kcp__read_udp_data: Received UDP packet %d, size=%zd bytes", packets_read, nread);
 
     // Track statistics
     ctx->pktRecvTotal++;
@@ -382,9 +421,16 @@ static void kcp__read_udp_data(uvkcp_t* stream) {
     // Feed the raw UDP data to KCP
     int rc = ikcp_input(ctx->kcp, buffer, nread);
     if (rc < 0) {
+      UVKCP_LOG_ERROR("kcp__read_udp_data: KCP input failed with error %d", rc);
       // KCP input error, but continue processing
       break;
+    } else {
+      UVKCP_LOG("kcp__read_udp_data: Successfully fed %zd bytes to KCP", nread);
     }
+  }
+
+  if (packets_read > 0) {
+    UVKCP_LOG("kcp__read_udp_data: Completed - read %d packets, total %d bytes", packets_read, total_bytes);
   }
 }
 
@@ -393,6 +439,8 @@ static void kcp__read(uvkcp_t* stream) {
   ssize_t nread;
   int count;
 
+  UVKCP_LOG_FUNC("kcp__read: Starting KCP read operation");
+
   // First, read any available UDP data and feed it to KCP
   kcp__read_udp_data(stream);
 
@@ -400,24 +448,30 @@ static void kcp__read(uvkcp_t* stream) {
    * we can read it. XXX Need to rearm fd if we switch to edge-triggered I/O.
    */
   count = 32;
+  int read_attempts = 0;
 
   while ((stream->read_cb)
       && (stream->flags & UVKCP_FLAG_READABLE)
       && (count-- > 0)) {
+    read_attempts++;
     assert(stream->alloc_cb);
 
     buf = uv_buf_init(NULL, 0);
     stream->alloc_cb((uv_handle_t *)stream, 64 * 1024, &buf);
     if (buf.base == NULL || buf.len == 0)
     {
+        UVKCP_LOG("kcp__read: User buffer allocation failed - base=%p, len=%zu", buf.base, buf.len);
         /* User indicates it can't or won't handle the read. */
         stream->read_cb(stream, UV_ENOBUFS, &buf);
         return;
     }
     assert(buf.base != NULL);
 
+    UVKCP_LOG("kcp__read: Attempt %d - allocated buffer: base=%p, len=%zu", read_attempts, buf.base, buf.len);
+
     kcp_context_t* ctx = kcp__get_context(stream);
     if (!ctx || !ctx->kcp) {
+        UVKCP_LOG_ERROR("kcp__read: Invalid KCP context or KCP instance");
         stream->read_cb(stream, UV_ENOTCONN, &buf);
         return;
     }
@@ -425,41 +479,53 @@ static void kcp__read(uvkcp_t* stream) {
     // KCP recv
     {
         nread = ikcp_recv(ctx->kcp, buf.base, buf.len);
+        UVKCP_LOG("kcp__read: ikcp_recv returned %zd (buffer_len=%zu)", nread, buf.len);
 
         if (nread < 0) {
         /* Error */
         if (nread == -1) {
+          UVKCP_LOG("kcp__read: No data available from KCP");
           /* No data available, wait for next data */
           stream->read_cb(stream, 0, &buf);
           return;
         } else if (nread == -2) {
+          UVKCP_LOG_ERROR("kcp__read: Buffer too small for KCP data (buffer_len=%zu)", buf.len);
           /* Buffer too small, need larger buffer */
           stream->read_cb(stream, UV_ENOBUFS, &buf);
           return;
         } else if (nread == -3) {
+          UVKCP_LOG_ERROR("kcp__read: Invalid KCP state");
           /* Invalid KCP state */
           stream->read_cb(stream, UV_EIO, &buf);
           return;
         } else {
+          UVKCP_LOG_ERROR("kcp__read: Other KCP error: %zd", nread);
           /* Other error */
           stream->read_cb(stream, UV_EIO, &buf);
           return;
         }
       } else if (nread == 0) {
+        UVKCP_LOG("kcp__read: No data available (nread=0)");
         // No data available
         stream->read_cb(stream, 0, &buf);
         return;
       } else {
         /* Successful read */
         ssize_t buflen = buf.len;
+        UVKCP_LOG("kcp__read: Successfully read %zd bytes from KCP", nread);
         stream->read_cb(stream, nread, &buf);
 
         /* Return if we didn't fill the buffer, there is no more data to read. */
         if (nread < buflen) {
+          UVKCP_LOG("kcp__read: Partial read (%zd < %zu), stopping read loop", nread, buflen);
           return;
         }
       }
     }
+  }
+
+  if (read_attempts > 0) {
+    UVKCP_LOG("kcp__read: Completed - %d read attempts made", read_attempts);
   }
 }
 
@@ -508,7 +574,7 @@ static void kcp__timer_cb(uv_timer_t* timer) {
 
     // Reschedule timer for next update time
     if (next_update > 0) {
-        uv_timer_start(&ctx->timer_handle, kcp__timer_cb, next_update, 0);
+        uv_timer_start(&ctx->timer_handle, kcp__timer_cb, 10/*next_update*/, 0);
         ctx->timer_active = 1;
         UVKCP_LOG("KCP timer rescheduled, next update in %u ms", next_update);
     } else {
@@ -558,8 +624,15 @@ void kcp__stream_io(uv_poll_t * handle, int status, int events) {
     }
 
     if (stream->connect_req) {
-      UVKCP_LOG("Processing connection request");
-      kcp__stream_connect(stream);
+      kcp_context_t* ctx = kcp__get_context(stream);
+      // For KCP with TCP handshake, only process connection request if
+      // TCP handshake is not in progress (no pending_connect_req)
+      if (ctx && ctx->pending_connect_req) {
+        UVKCP_LOG("TCP handshake in progress, deferring connection processing");
+      } else {
+        UVKCP_LOG("Processing connection request");
+        kcp__stream_connect(stream);
+      }
     } else {
       // Start timer if not already active
       if (!ctx->timer_active) {
@@ -571,7 +644,7 @@ void kcp__stream_io(uv_poll_t * handle, int status, int events) {
           next_update = ikcp_check(ctx->kcp, current);
         }
         if (next_update > 0) {
-          uv_timer_start(&ctx->timer_handle, kcp__timer_cb, next_update, 0);
+          uv_timer_start(&ctx->timer_handle, kcp__timer_cb, 10/*next_update*/, 0);
           ctx->timer_active = 1;
           UVKCP_LOG("Started KCP timer, next update in %u ms", next_update);
         }
@@ -609,6 +682,8 @@ static void kcp__stream_connect(uvkcp_t* stream) {
   int error;
   uvkcp_connect_t* req = stream->connect_req;
 
+  UVKCP_LOG_FUNC("kcp__stream_connect: Processing connection request");
+
   assert(req);
 
   if (stream->delayed_error) {
@@ -618,24 +693,34 @@ static void kcp__stream_connect(uvkcp_t* stream) {
      */
     error = stream->delayed_error;
     stream->delayed_error = 0;
+    UVKCP_LOG("kcp__stream_connect: Using delayed error: %d", error);
   } else {
         kcp_context_t* ctx = kcp__get_context(stream);
-        if (!ctx || !ctx->kcp) {
+        if (!ctx) {
             error = UV_ENOTCONN;
+            UVKCP_LOG_ERROR("kcp__stream_connect: Invalid KCP context");
+        } else if (!ctx->kcp) {
+            error = UV_ENOTCONN;
+            UVKCP_LOG("kcp__stream_connect: KCP instance not created yet (TCP handshake in progress)");
         } else if (ctx->is_connected) {
             error = 0;
+            UVKCP_LOG("kcp__stream_connect: Connection already established");
         } else {
             error = UV_EALREADY;
+            UVKCP_LOG("kcp__stream_connect: Connection still in progress (TCP handshake)");
         }
   }
 
-  if (error == UV_EALREADY)
+  if (error == UV_EALREADY) {
+    UVKCP_LOG("kcp__stream_connect: Connection still in progress, returning");
     return;
+  }
 
   stream->connect_req = NULL;
+  UVKCP_LOG("kcp__stream_connect: Cleared connect_req, calling callback with status=%d", error);
 
   if (req->cb) {
-    req->cb(req, error ? UV_ECONNREFUSED : 0);
+    req->cb(req, error);
   }
 }
 
@@ -647,8 +732,11 @@ int uvkcp_write(uvkcp_write_t *req, uvkcp_t *stream, const uv_buf_t bufs[], unsi
 {
     int empty_queue;
 
+    UVKCP_LOG_FUNC("uvkcp_write: nbufs=%u", nbufs);
+
     kcp_context_t* ctx = kcp__get_context(stream);
     if (!ctx || !ctx->kcp) {
+        UVKCP_LOG_ERROR("uvkcp_write: Invalid KCP context or KCP instance");
         return -1;
     }
 
@@ -658,10 +746,12 @@ int uvkcp_write(uvkcp_write_t *req, uvkcp_t *stream, const uv_buf_t bufs[], unsi
          (flags & UVKCP_FLAG_SHUTTING) || (flags & UVKCP_FLAG_SHUT) ||
          (flags & UVKCP_FLAG_CLOSING)  || (flags & UVKCP_FLAG_CLOSED))
     {
+        UVKCP_LOG_ERROR("uvkcp_write: Invalid stream state - flags=0x%x", flags);
         return -1;
     }
 
     empty_queue = (stream->write_queue_size == 0);
+    UVKCP_LOG("uvkcp_write: empty_queue=%d, current_queue_size=%zu", empty_queue, stream->write_queue_size);
 
     /* Initialize the req */
     req->type = UVKCP_REQ_WRITE;
@@ -674,13 +764,20 @@ int uvkcp_write(uvkcp_write_t *req, uvkcp_t *stream, const uv_buf_t bufs[], unsi
     if (nbufs > (sizeof(req->bufsml)/sizeof(req->bufsml[0])))
         req->bufs = malloc(nbufs * sizeof(bufs[0]));
 
-    if (req->bufs == NULL)
+    if (req->bufs == NULL) {
+        UVKCP_LOG_ERROR("uvkcp_write: Failed to allocate buffer array");
         return UV_ENOMEM;
+    }
 
     memcpy(req->bufs, bufs, nbufs * sizeof(uv_buf_t));
     req->nbufs = nbufs;
     req->write_index = 0;
-    stream->write_queue_size += kcp__buf_count(bufs, nbufs);
+
+    size_t total_bytes = kcp__buf_count(bufs, nbufs);
+    stream->write_queue_size += total_bytes;
+
+    UVKCP_LOG("uvkcp_write: Adding %zu bytes to write queue, new queue_size=%zu",
+              total_bytes, stream->write_queue_size);
 
     /* Append the request to write_queue. */
     QUEUE_INSERT_TAIL(&stream->write_queue, &req->queue);
@@ -689,17 +786,22 @@ int uvkcp_write(uvkcp_write_t *req, uvkcp_t *stream, const uv_buf_t bufs[], unsi
    * do the write immediately. Otherwise start the write_watcher and wait
    * for the fd to become writable.
    */
-    if (stream->connect_req)
+    if (ctx && !ctx->is_connected)
     {
-        /* Still connecting, do nothing. */
+        /* Still connecting or TCP handshake in progress, do nothing. */
+        UVKCP_LOG("uvkcp_write: Still connecting (connect_req=%p, is_connected=%d), deferring write",
+                  stream->connect_req, ctx ? ctx->is_connected : -1);
     }
     else if (empty_queue)
     {
+        UVKCP_LOG("uvkcp_write: Queue was empty, attempting immediate write");
         kcp__write(stream);
     } else {
+        UVKCP_LOG("uvkcp_write: Queue not empty, returning UV_ENOBUFS");
         return UV_ENOBUFS;
     }
 
+    UVKCP_LOG("uvkcp_write: Successfully queued write request");
     return 0;
 }
 
@@ -717,7 +819,8 @@ int uvkcp_try_write(uvkcp_t* stream,
   uvkcp_write_t req;
 
   /* Connecting or already writing some data */
-  if (stream->connect_req != NULL || stream->write_queue_size != 0)
+  kcp_context_t* ctx = kcp__get_context(stream);
+  if ((ctx && !ctx->is_connected) || stream->write_queue_size != 0)
     return UV_EAGAIN;
 
   r = uvkcp_write(&req, stream, bufs, nbufs, uvkcp_try_write_cb);
@@ -760,10 +863,13 @@ int uvkcp_read_start(uvkcp_t *stream, uv_alloc_cb alloc_cb,
     uv_poll_t *poll = (uv_poll_t *)stream;
     assert(poll->type == UV_POLL);
 
+    UVKCP_LOG_FUNC("uvkcp_read_start: Starting read operations");
+
     /* The UVKCP_FLAG_READABLE flag is irrelevant of the state of the tcp - it just
    * expresses the desired state of the user.
    */
     stream->flags |= UVKCP_FLAG_READABLE;
+    UVKCP_LOG("uvkcp_read_start: Set UVKCP_FLAG_READABLE flag");
 
     /* TODO: try to do the read inline? */
     /* TODO: keep track of tcp state. If we've gotten a EOF then we should
@@ -771,6 +877,7 @@ int uvkcp_read_start(uvkcp_t *stream, uv_alloc_cb alloc_cb,
    */
     kcp_context_t* ctx = kcp__get_context(stream);
     if (!ctx || !ctx->kcp) {
+        UVKCP_LOG_ERROR("uvkcp_read_start: Invalid KCP context or KCP instance");
         return -1;
     }
 
@@ -778,12 +885,15 @@ int uvkcp_read_start(uvkcp_t *stream, uv_alloc_cb alloc_cb,
 
     stream->read_cb = read_cb;
     stream->alloc_cb = alloc_cb;
+    UVKCP_LOG("uvkcp_read_start: Set read_cb=%p, alloc_cb=%p", read_cb, alloc_cb);
 
     if (uv_poll_start(poll, UV_READABLE, kcp__stream_io) < 0)
     {
+        UVKCP_LOG_ERROR("uvkcp_read_start: Failed to start polling");
         return -1;
     }
 
+    UVKCP_LOG("uvkcp_read_start: Successfully started polling for readable events");
     return 0;
 }
 
@@ -792,14 +902,18 @@ int uvkcp_read_stop(uvkcp_t* stream) {
     uv_poll_t *poll = (uv_poll_t *)stream;
     assert(poll->type == UV_POLL);
 
+    UVKCP_LOG_FUNC("uvkcp_read_stop: Stopping read operations");
+
     if (uv_poll_stop(poll) < 0)
     {
+        UVKCP_LOG_ERROR("uvkcp_read_stop: Failed to stop polling");
         return -1;
     }
 
     stream->flags   &= ~UVKCP_FLAG_READABLE;
     stream->read_cb  = NULL;
     stream->alloc_cb = NULL;
+    UVKCP_LOG("uvkcp_read_stop: Cleared UVKCP_FLAG_READABLE flag and callbacks");
 
     return 0;
 }
