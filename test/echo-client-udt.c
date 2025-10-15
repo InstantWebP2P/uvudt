@@ -55,7 +55,7 @@ static void buf_alloc(uv_handle_t* udt, size_t size, uv_buf_t *buf) {
 }
 
 
-static void buf_free(uv_buf_t * buf) {
+static void buf_free(const uv_buf_t * buf) {
   buf_t* ab = (buf_t*) (buf->base - sizeof *ab);
 
   ab->next = buf_freelist;
@@ -101,7 +101,7 @@ static void pinger_shutdown_cb(uvudt_shutdown_t* req, int status) {
 }
 
 
-static void pinger_read_cb(uvudt_t* udt, ssize_t nread, uv_buf_t * buf) {
+static void pinger_read_cb(uvudt_t* udt, ssize_t nread, const uv_buf_t * buf) {
   ssize_t i;
   pinger_t* pinger;
 
@@ -172,9 +172,9 @@ static void pinger_new(int port) {
 
   pinger->udt.poll.data = pinger;
 
-  uvudt_bind(&pinger->udt, &client_addr, 1, 1);
+  uvudt_bind(&pinger->udt, (const struct sockaddr*)&client_addr, 1, 1);
 
-  r = uvudt_connect(&pinger->connect_req, &pinger->udt, &server_addr, pinger_connect_cb);
+  r = uvudt_connect(&pinger->connect_req, &pinger->udt, (const struct sockaddr*)&server_addr, pinger_connect_cb);
   assert(!r);
 }
 
@@ -199,9 +199,9 @@ static void pinger_new6(int port)
 
     pinger->udt.poll.data = pinger;
 
-    uvudt_bind(&pinger->udt, &client_addr, 1, 1);
+    uvudt_bind(&pinger->udt, (const struct sockaddr*)&client_addr, 1, 1);
 
-    r = uvudt_connect(&pinger->connect_req, &pinger->udt, &server_addr, pinger_connect_cb);
+    r = uvudt_connect(&pinger->connect_req, &pinger->udt, (const struct sockaddr*)&server_addr, pinger_connect_cb);
     assert(!r);
 }
 

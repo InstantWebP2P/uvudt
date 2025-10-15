@@ -174,7 +174,7 @@ extern void udt__stream_io(uv_poll_t *handle, int status, int events);
                    const struct sockaddr *addr,
                    uvudt_connect_cb cb)
 {
-    int r;
+    int r __attribute__((unused));
 
     socklen_t addrlen = (addr->sa_family == AF_INET6) ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in);
 
@@ -515,7 +515,7 @@ int uvudt_getperf(uvudt_t *udt, uvudt_netperf_t *perf, int clear)
 */
 
 // transfer UDT error code to LIBUV errno
-int uvudt_translate_udt_error()
+int uvudt_translate_udt_error(void)
 {
 #ifdef UDT_DEBUG
     fprintf(stdout, "func:%s, line:%d, errno: %d, %s\n", __FUNCTION__, __LINE__, udt_getlasterror_code(), udt_getlasterror_desc());
