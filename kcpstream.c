@@ -38,7 +38,8 @@ static size_t kcp__buf_count(const uv_buf_t bufs[], int nbufs)
 static void kcp__stream_connect(uvkcp_t *stream);
 static void kcp__write(uvkcp_t *stream);
 static void kcp__read(uvkcp_t *stream);
-static void kcp__timer_cb(uv_timer_t* timer);
+// Timer callback is implemented in uvkcp.c - this is just a forward declaration
+extern void kcp__timer_cb(uv_timer_t* timer);
 static void kcp__server_io(uvkcp_t *stream);
 void kcp__stream_io(uv_poll_t *handle, int status, int events);
 
@@ -386,6 +387,27 @@ static void kcp__read_udp_data(uvkcp_t* stream) {
     return;
   }
 
+  // Log the UDP port we're receiving on
+  struct sockaddr_storage local_addr;
+  socklen_t local_addr_len = sizeof(local_addr);
+  if (getsockname(ctx->udp_fd, (struct sockaddr *)&local_addr, &local_addr_len) == 0)
+  {
+      if (local_addr.ss_family == AF_INET)
+      {
+          struct sockaddr_in *addr_in = (struct sockaddr_in *)&local_addr;
+          UVKCP_LOG("kcp__read_udp_data: Listening for UDP data on port %d", ntohs(addr_in->sin_port));
+      }
+      else if (local_addr.ss_family == AF_INET6)
+      {
+          struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)&local_addr;
+          UVKCP_LOG("kcp__read_udp_data: Listening for UDP data on port %d", ntohs(addr_in6->sin6_port));
+      }
+  }
+  else
+  {
+      UVKCP_LOG("kcp__read_udp_data: Failed to get local UDP socket address");
+  }
+
   char buffer[65536];
   struct sockaddr_storage peer_addr;
   socklen_t addr_len = sizeof(peer_addr);
@@ -412,7 +434,27 @@ static void kcp__read_udp_data(uvkcp_t* stream) {
     packets_read++;
     total_bytes += nread;
 
-    UVKCP_LOG("kcp__read_udp_data: Received UDP packet %d, size=%zd bytes", packets_read, nread);
+    // Log the peer's UDP port and address
+    if (peer_addr.ss_family == AF_INET)
+    {
+        struct sockaddr_in *addr_in = (struct sockaddr_in *)&peer_addr;
+        char ip_str[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &addr_in->sin_addr, ip_str, sizeof(ip_str));
+        UVKCP_LOG("kcp__read_udp_data: Received UDP packet %d, size=%zd bytes from %s:%d",
+                  packets_read, nread, ip_str, ntohs(addr_in->sin_port));
+    }
+    else if (peer_addr.ss_family == AF_INET6)
+    {
+        struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)&peer_addr;
+        char ip_str[INET6_ADDRSTRLEN];
+        inet_ntop(AF_INET6, &addr_in6->sin6_addr, ip_str, sizeof(ip_str));
+        UVKCP_LOG("kcp__read_udp_data: Received UDP packet %d, size=%zd bytes from [%s]:%d",
+                  packets_read, nread, ip_str, ntohs(addr_in6->sin6_port));
+    }
+    else
+    {
+        UVKCP_LOG("kcp__read_udp_data: Received UDP packet %d, size=%zd bytes", packets_read, nread);
+    }
 
     // Track statistics
     ctx->pktRecvTotal++;
@@ -612,21 +654,10 @@ void kcp__stream_io(uv_poll_t * handle, int status, int events) {
         kcp__stream_connect(stream);
       }
     } else {
-      // Start timer if not already active
+      // For interval-based approach, the timer is started when connection is established
+      // and runs continuously with fixed interval, so no need to start it here
       if (!ctx->timer_active) {
-        IUINT32 current = uv_now(ctx->loop);
-        ikcp_update(ctx->kcp, current);
-        IUINT32 next_update = ikcp_check(ctx->kcp, current);
-        if (next_update == 0) {
-          // Update immediately and check again
-          ikcp_update(ctx->kcp, current);
-          next_update = ikcp_check(ctx->kcp, current);
-        }
-        if (next_update > 0) {
-          uv_timer_start(&ctx->timer_handle, kcp__timer_cb, next_update, 0);
-          ctx->timer_active = 1;
-          UVKCP_LOG("Started KCP timer, next update in %u ms", next_update);
-        }
+        UVKCP_LOG("KCP interval timer not active, connection may not be fully established");
       }
 
       // Process readable events - always try to read UDP data first
@@ -640,14 +671,8 @@ void kcp__stream_io(uv_poll_t * handle, int status, int events) {
         kcp__write_callbacks(stream);
       }
 
-      // Update KCP to flush any pending output, but only if we have data to send
-      // This is more efficient than always calling ikcp_update()
-      IUINT32 current = uv_now(ctx->loop);
-      IUINT32 next_update = ikcp_check(ctx->kcp, current);
-      if (next_update == 0) {
-        // KCP has work to do immediately
-        ikcp_update(ctx->kcp, current);
-      }
+      // With interval-based approach, KCP updates are handled by the timer
+      // No need for manual updates here - the interval timer will handle it
     }
 }
 

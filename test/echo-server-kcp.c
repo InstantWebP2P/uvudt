@@ -55,11 +55,11 @@ static void after_read(uvkcp_t* handle,
   write_req_t *wr;
   uvkcp_shutdown_t* sreq;
 
-  printf("[SERVER] Read callback: nread=%zd\n", nread);
+  printf("[SERVER] Read callback: nread=%zd, buf_base=%p, buf_len=%zu\n", nread, buf->base, buf->len);
 
   if (nread < 0) {
     /* Error or EOF */
-    printf("[SERVER] Read error: %zd\n", nread);
+    printf("[SERVER] Read error: %zd (%s)\n", nread, uv_err_name(nread));
     assert(nread == UV_EOF);
 
     free(buf->base);
@@ -75,13 +75,25 @@ static void after_read(uvkcp_t* handle,
     return;
   }
 
+  // Log the actual data received
+  ssize_t j;
+  printf("[SERVER] Received %zd bytes of data: ", nread);
+  for (j = 0; j < nread && j < 32; j++) {
+    printf("%02x ", (unsigned char)buf->base[j]);
+  }
+  if (nread > 32) printf("...");
+  printf("\n");
+
   wr = (write_req_t*) malloc(sizeof *wr);
   assert(wr != NULL);
   wr->buf = uv_buf_init(buf->base, nread);
 
   printf("[SERVER] Echoing back %zd bytes\n", nread);
-  if (uvkcp_write(&wr->req, handle, &wr->buf, 1, after_write)) {
-    printf("[SERVER] uvkcp_write failed");
+  int write_result = uvkcp_write(&wr->req, handle, &wr->buf, 1, after_write);
+  if (write_result) {
+    printf("[SERVER] uvkcp_write failed with error: %d\n", write_result);
+  } else {
+    printf("[SERVER] uvkcp_write succeeded\n");
   }
 }
 

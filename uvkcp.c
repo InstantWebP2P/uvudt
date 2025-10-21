@@ -32,7 +32,7 @@ static int remove_conv_from_registry(kcp_context_t *ctx, uint32_t conv_id);
 static void cleanup_conv_registry(kcp_context_t *ctx);
 static int conv_exists_in_registry(kcp_context_t *ctx, uint32_t conv_id);
 
-void kcp__timer_cb(uv_timer_t *timer)
+void kcp__interval_cb(uv_timer_t *timer)
 {
     kcp_context_t *ctx = (kcp_context_t *)timer->data;
     if (!ctx || !ctx->kcp)
@@ -45,27 +45,8 @@ void kcp__timer_cb(uv_timer_t *timer)
     // Update KCP state - this will flush any pending output
     ikcp_update(ctx->kcp, current);
 
-    // Check when next update is needed
-    IUINT32 next_update = ikcp_check(ctx->kcp, current);
-
-    if (next_update == 0)
-    {
-        // Update immediately and check again
-        ikcp_update(ctx->kcp, current);
-        next_update = ikcp_check(ctx->kcp, current);
-    }
-    // Reschedule timer for next update time
-    if (next_update > 0)
-    {
-        uv_timer_start(&ctx->timer_handle, kcp__timer_cb, next_update, 0);
-        ctx->timer_active = 1;
-        UVKCP_LOG("KCP timer rescheduled, next update in %u ms", next_update);
-    }
-    else
-    {
-        ctx->timer_active = 0;
-        UVKCP_LOG("KCP timer stopped, no more updates needed");
-    }
+    ctx->timer_active = 1;
+    ///UVKCP_LOG("KCP interval update completed");
 }
 
 // KCP debug logging callback
@@ -106,6 +87,22 @@ static int kcp_output(const char *buf, int len, ikcpcb *kcp, void *user)
             return -1;
         }
         return -1;
+    }
+
+    // Log UDP send details
+    if (ctx->peer_addr.ss_family == AF_INET)
+    {
+        struct sockaddr_in *addr_in = (struct sockaddr_in *)&ctx->peer_addr;
+        char ip_str[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &addr_in->sin_addr, ip_str, sizeof(ip_str));
+        UVKCP_LOG("kcp_output: Sent %zd bytes to %s:%d", sent, ip_str, ntohs(addr_in->sin_port));
+    }
+    else if (ctx->peer_addr.ss_family == AF_INET6)
+    {
+        struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)&ctx->peer_addr;
+        char ip_str[INET6_ADDRSTRLEN];
+        inet_ntop(AF_INET6, &addr_in6->sin6_addr, ip_str, sizeof(ip_str));
+        UVKCP_LOG("kcp_output: Sent %zd bytes to [%s]:%d", sent, ip_str, ntohs(addr_in6->sin6_port));
     }
 
     // Track statistics
@@ -169,7 +166,7 @@ int uvkcp_init(uv_loop_t *loop, uvkcp_t *handle)
     // Initialize conversation registry
     ctx->conv_registry = NULL;
 
-    // Initialize timer handle
+    // Initialize timer handle for interval-based KCP updates
     if (uv_timer_init(loop, &ctx->timer_handle) < 0)
     {
         UVKCP_LOG_ERROR("Failed to initialize timer");
@@ -177,6 +174,7 @@ int uvkcp_init(uv_loop_t *loop, uvkcp_t *handle)
         return UV_ENOMEM;
     }
     ctx->timer_handle.data = ctx;
+    ctx->update_interval = 10; // Default 10ms interval for KCP updates
 
     // Store context in handle
     handle->kcp_ctx = ctx;
@@ -249,10 +247,18 @@ int uvkcp_bind(uvkcp_t *handle, const struct sockaddr *addr, int reuseaddr, int 
     memcpy(&ctx->server_addr, addr, sizeof(ctx->server_addr));
     ctx->server_addr_len = (addr->sa_family == AF_INET) ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6);
 
+    // Log the TCP port we're binding to
+    if (addr->sa_family == AF_INET) {
+        struct sockaddr_in *addr_in = (struct sockaddr_in *)addr;
+        UVKCP_LOG("KCP handle bound to TCP handshake socket on port %d, ready for listening", ntohs(addr_in->sin_port));
+    } else if (addr->sa_family == AF_INET6) {
+        struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)addr;
+        UVKCP_LOG("KCP handle bound to TCP handshake socket on port %d, ready for listening", ntohs(addr_in6->sin6_port));
+    }
+
     // UDP socket will be created later for each client connection
     ctx->udp_fd = -1;
 
-    UVKCP_LOG("KCP handle bound to TCP handshake socket, ready for listening");
     return 0;
 }
 
@@ -879,31 +885,87 @@ static void tcp_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread, const 
         uint32_t assigned_conv = generate_conv_id(server_ctx);
         response.conv = htonl(assigned_conv);
 
-        // Get server's TCP socket address for proper peer communication
-        // UDP socket will be created later for each client connection
-        struct sockaddr_storage server_addr;
-        socklen_t server_addr_len = sizeof(server_addr);
-        if (getsockname(server_ctx->tcp_server.io_watcher.fd, (struct sockaddr *)&server_addr, &server_addr_len) == 0)
+        // Create UDP socket for this client connection and get its actual UDP port
+        int domain = (handshake->addr_family == AF_INET) ? AF_INET : AF_INET6;
+        int server_udp_sock = socket(domain, SOCK_DGRAM, 0);
+        UVKCP_LOG("Creating UDP socket for client connection: domain=%d, sock=%d", domain, server_udp_sock);
+        if (server_udp_sock >= 0)
         {
-            if (server_addr.ss_family == AF_INET)
+            // Bind the server UDP socket to any available port
+            struct sockaddr_storage bind_addr;
+            socklen_t bind_addr_len = sizeof(bind_addr);
+            memset(&bind_addr, 0, sizeof(bind_addr));
+
+            if (domain == AF_INET)
             {
-                struct sockaddr_in *addr_in = (struct sockaddr_in *)&server_addr;
-                response.udp_port = addr_in->sin_port;
+                struct sockaddr_in *addr_in = (struct sockaddr_in *)&bind_addr;
+                addr_in->sin_family = AF_INET;
+                addr_in->sin_addr.s_addr = INADDR_ANY;
+                addr_in->sin_port = 0; // Let OS assign port
+                bind_addr_len = sizeof(struct sockaddr_in);
+                UVKCP_LOG("Binding IPv4 UDP socket to any available port");
             }
-            else if (server_addr.ss_family == AF_INET6)
+            else
             {
-                struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)&server_addr;
-                response.udp_port = addr_in6->sin6_port;
+                struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)&bind_addr;
+                addr_in6->sin6_family = AF_INET6;
+                addr_in6->sin6_addr = in6addr_any;
+                addr_in6->sin6_port = 0; // Let OS assign port
+                bind_addr_len = sizeof(struct sockaddr_in6);
+                UVKCP_LOG("Binding IPv6 UDP socket to any available port");
+            }
+
+            int bind_result = bind(server_udp_sock, (struct sockaddr *)&bind_addr, bind_addr_len);
+            UVKCP_LOG("UDP socket bind result: %d (errno=%d)", bind_result, errno);
+            if (bind_result == 0)
+            {
+                // Get the actual UDP port that was assigned
+                struct sockaddr_storage actual_addr;
+                socklen_t actual_addr_len = sizeof(actual_addr);
+                int getsockname_result = getsockname(server_udp_sock, (struct sockaddr *)&actual_addr, &actual_addr_len);
+                UVKCP_LOG("getsockname result: %d (errno=%d)", getsockname_result, errno);
+                if (getsockname_result == 0)
+                {
+                    if (actual_addr.ss_family == AF_INET)
+                    {
+                        struct sockaddr_in *addr_in = (struct sockaddr_in *)&actual_addr;
+                        response.udp_port = addr_in->sin_port;
+                        UVKCP_LOG("Server UDP socket bound to port %d for client connection", ntohs(addr_in->sin_port));
+                    }
+                    else if (actual_addr.ss_family == AF_INET6)
+                    {
+                        struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)&actual_addr;
+                        response.udp_port = addr_in6->sin6_port;
+                        UVKCP_LOG("Server UDP socket bound to port %d for client connection", ntohs(addr_in6->sin6_port));
+                    }
+                    else
+                    {
+                        response.udp_port = 0;
+                        UVKCP_LOG("Unknown address family for UDP socket: %d", actual_addr.ss_family);
+                    }
+                }
+                else
+                {
+                    response.udp_port = 0;
+                    UVKCP_LOG_ERROR("Failed to get UDP socket name: %s", strerror(errno));
+                }
             }
             else
             {
                 response.udp_port = 0;
+                UVKCP_LOG_ERROR("Failed to bind UDP socket: %s", strerror(errno));
+                close(server_udp_sock);
+                server_udp_sock = -1;
             }
         }
         else
         {
             response.udp_port = 0;
+            UVKCP_LOG_ERROR("Failed to create UDP socket: %s", strerror(errno));
         }
+
+        // Store the server UDP socket in the TCP client data for later use
+        tcp_client->data = (void *)(intptr_t)server_udp_sock;
 
         response.addr_family = handshake->addr_family;
         memcpy(response.peer_addr, handshake->peer_addr, sizeof(response.peer_addr));
@@ -932,43 +994,10 @@ static void tcp_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread, const 
                     kcp_context_t *ctx = (kcp_context_t *)client->kcp_ctx;
                     if (ctx)
                     {
-                        // Create UDP socket for KCP communication
-                        int domain = (handshake->addr_family == AF_INET) ? AF_INET : AF_INET6;
-                        int sock = socket(domain, SOCK_DGRAM, 0);
+                        // Use the UDP socket that was already created and bound during handshake
+                        int sock = server_udp_sock;
                         if (sock >= 0)
                         {
-                            // Bind the server socket to any available port
-                            struct sockaddr_storage bind_addr;
-                            socklen_t bind_addr_len = sizeof(bind_addr);
-                            memset(&bind_addr, 0, sizeof(bind_addr));
-
-                            if (domain == AF_INET)
-                            {
-                                struct sockaddr_in *addr_in = (struct sockaddr_in *)&bind_addr;
-                                addr_in->sin_family = AF_INET;
-                                addr_in->sin_addr.s_addr = INADDR_ANY;
-                                addr_in->sin_port = 0; // Let OS assign port
-                                bind_addr_len = sizeof(struct sockaddr_in);
-                            }
-                            else
-                            {
-                                struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)&bind_addr;
-                                addr_in6->sin6_family = AF_INET6;
-                                addr_in6->sin6_addr = in6addr_any;
-                                addr_in6->sin6_port = 0; // Let OS assign port
-                                bind_addr_len = sizeof(struct sockaddr_in6);
-                            }
-
-                            if (bind(sock, (struct sockaddr *)&bind_addr, bind_addr_len) < 0)
-                            {
-                                UVKCP_LOG_ERROR("Failed to bind server UDP socket: %s", strerror(errno));
-                                close(sock);
-                                ctx->is_connected = 0; // Reset connection state on failure
-                                // Call connection callback with error
-                                kcp_server->connection_cb(NULL, uv_translate_sys_error(errno));
-                                goto cleanup_handshake;
-                            }
-
                             // Set socket to non-blocking mode for libuv integration
                             if (set_socket_nonblocking(sock) != 0)
                             {
@@ -980,6 +1009,27 @@ static void tcp_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread, const 
                                 goto cleanup_handshake;
                             }
                             ctx->udp_fd = sock;
+
+                            // Log the UDP port that was assigned
+                            struct sockaddr_storage local_addr;
+                            socklen_t local_addr_len = sizeof(local_addr);
+                            if (getsockname(sock, (struct sockaddr *)&local_addr, &local_addr_len) == 0)
+                            {
+                                if (local_addr.ss_family == AF_INET)
+                                {
+                                    struct sockaddr_in *addr_in = (struct sockaddr_in *)&local_addr;
+                                    UVKCP_LOG("Server UDP socket bound to port %d for KCP communication", ntohs(addr_in->sin_port));
+                                }
+                                else if (local_addr.ss_family == AF_INET6)
+                                {
+                                    struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)&local_addr;
+                                    UVKCP_LOG("Server UDP socket bound to port %d for KCP communication", ntohs(addr_in6->sin6_port));
+                                }
+                            }
+                            else
+                            {
+                                UVKCP_LOG_ERROR("Failed to get server UDP socket name: %s", strerror(errno));
+                            }
 
                             // Create KCP instance with assigned conversation ID
                             uint32_t conv_id = ntohl(response.conv);
@@ -999,7 +1049,7 @@ static void tcp_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread, const 
                                 // Configure KCP
                                 ikcp_setoutput(ctx->kcp, kcp_output);
                                 ctx->kcp->writelog = kcp_writelog;
-                                ctx->kcp->logmask = 0xffffffff; /// IKCP_LOG_OUTPUT | IKCP_LOG_INPUT | IKCP_LOG_SEND | IKCP_LOG_RECV | IKCP_LOG_IN_DATA | IKCP_LOG_IN_ACK;
+                                ctx->kcp->logmask = IKCP_LOG_OUTPUT | IKCP_LOG_INPUT | IKCP_LOG_SEND | IKCP_LOG_RECV | IKCP_LOG_IN_DATA | IKCP_LOG_IN_ACK;
                                 ikcp_nodelay(ctx->kcp, 1, 10, 2, 1);
                                 ikcp_wndsize(ctx->kcp, 128, 128);
                                 ikcp_setmtu(ctx->kcp, 1400);
@@ -1025,23 +1075,14 @@ static void tcp_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread, const 
                                 // Mark as connected
                                 ctx->is_connected = 1;
 
-                                // Start KCP timer for the new connection
+                                // Start KCP interval for the new connection
                                 IUINT32 current = uv_now(ctx->loop);
                                 ikcp_update(ctx->kcp, current);
-                                IUINT32 next_update = ikcp_check(ctx->kcp, current);
 
-                                if (next_update == 0)
-                                {
-                                    // Update immediately and check again
-                                    ikcp_update(ctx->kcp, current);
-                                    next_update = ikcp_check(ctx->kcp, current);
-                                }
-                                if (next_update > 0)
-                                {
-                                    uv_timer_start(&ctx->timer_handle, kcp__timer_cb, next_update, 0);
-                                    ctx->timer_active = 1;
-                                    UVKCP_LOG("Started KCP timer for server connection, next update in %u ms", next_update);
-                                }
+                                // Start interval timer with fixed interval
+                                uv_timer_start(&ctx->timer_handle, kcp__interval_cb, ctx->update_interval, ctx->update_interval);
+                                ctx->timer_active = 1;
+                                UVKCP_LOG("Started KCP interval for server connection, interval=%u ms", ctx->update_interval);
 
                                 // Open the KCP stream
                                 if (kcp__stream_open(client, sock, UVKCP_FLAG_READABLE | UVKCP_FLAG_WRITABLE) == 0)
@@ -1227,9 +1268,24 @@ static void tcp_connect_cb(uv_connect_t *req, int status)
         }
         ctx->udp_fd = sock;
 
-        // Get client's UDP socket address for proper peer communication
+        // Log the UDP port that was assigned to the client
         struct sockaddr_storage client_addr;
         socklen_t client_addr_len = sizeof(client_addr);
+        if (getsockname(ctx->udp_fd, (struct sockaddr *)&client_addr, &client_addr_len) == 0)
+        {
+            if (client_addr.ss_family == AF_INET)
+            {
+                struct sockaddr_in *addr_in = (struct sockaddr_in *)&client_addr;
+                UVKCP_LOG("Client UDP socket bound to port %d for KCP communication", ntohs(addr_in->sin_port));
+            }
+            else if (client_addr.ss_family == AF_INET6)
+            {
+                struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)&client_addr;
+                UVKCP_LOG("Client UDP socket bound to port %d for KCP communication", ntohs(addr_in6->sin6_port));
+            }
+        }
+
+        // Get client's UDP socket address for proper peer communication
         if (getsockname(ctx->udp_fd, (struct sockaddr *)&client_addr, &client_addr_len) == 0)
         {
             if (client_addr.ss_family == AF_INET)
@@ -1375,7 +1431,7 @@ static void tcp_client_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread,
                     ikcp_setoutput(ctx->kcp, kcp_output);
 
                     ctx->kcp->writelog = kcp_writelog;
-                    ctx->kcp->logmask = 0xffffffff; /// IKCP_LOG_OUTPUT | IKCP_LOG_INPUT | IKCP_LOG_SEND | IKCP_LOG_RECV | IKCP_LOG_IN_DATA | IKCP_LOG_IN_ACK;
+                    ctx->kcp->logmask = IKCP_LOG_OUTPUT | IKCP_LOG_INPUT | IKCP_LOG_SEND | IKCP_LOG_RECV | IKCP_LOG_IN_DATA | IKCP_LOG_IN_ACK;
 
                     ikcp_nodelay(ctx->kcp, 1, 10, 2, 1);
                     ikcp_wndsize(ctx->kcp, 128, 128);
@@ -1405,23 +1461,14 @@ static void tcp_client_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread,
                     ctx->is_connected = 1;
                     UVKCP_LOG("tcp_client_handshake_read_cb: Marked connection as established (is_connected=1)");
 
-                    // Start KCP timer for the client connection
+                    // Start KCP interval for the client connection
                     IUINT32 current = uv_now(ctx->loop);
                     ikcp_update(ctx->kcp, current);
-                    IUINT32 next_update = ikcp_check(ctx->kcp, current);
 
-                    if (next_update == 0)
-                    {
-                        // Update immediately and check again
-                        ikcp_update(ctx->kcp, current);
-                        next_update = ikcp_check(ctx->kcp, current);
-                    }
-                    if (next_update > 0)
-                    {
-                        uv_timer_start(&ctx->timer_handle, kcp__timer_cb, 10 /*next_update*/, 1);
-                        ctx->timer_active = 1;
-                        UVKCP_LOG("Started KCP timer for client connection, next update in %u ms", next_update);
-                    }
+                    // Start interval timer with fixed interval
+                    uv_timer_start(&ctx->timer_handle, kcp__interval_cb, ctx->update_interval, ctx->update_interval);
+                    ctx->timer_active = 1;
+                    UVKCP_LOG("Started KCP interval for client connection, interval=%u ms", ctx->update_interval);
 
                     // Open the KCP stream
                     if (kcp__stream_open(client, ctx->udp_fd, UVKCP_FLAG_READABLE | UVKCP_FLAG_WRITABLE) == 0)

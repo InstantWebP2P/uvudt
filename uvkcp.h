@@ -57,6 +57,7 @@ struct kcp_context_s {
     int is_connected;
     int is_listening;
     int timer_active;
+    uint32_t update_interval;  // Interval for KCP updates in milliseconds
 
     // Server-specific fields
     int backlog;

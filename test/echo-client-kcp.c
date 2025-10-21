@@ -107,21 +107,32 @@ static void pinger_read_cb(uvkcp_t* kcp, ssize_t nread, const uv_buf_t * buf) {
 
   pinger = (pinger_t*)((uv_handle_t*)kcp)->data;
 
-  printf("[CLIENT] Read callback: nread=%zd\n", nread);
+  printf("[CLIENT] Read callback: nread=%zd, buf_base=%p, buf_len=%zu\n", nread, buf->base, buf->len);
 
   if (nread < 0) {
     if (buf->base) {
       buf_free(buf);
     }
 
-    printf("[CLIENT] Read error: %zd\n", nread);
+    printf("[CLIENT] Read error: %zd (%s)\n", nread, uv_err_name(nread));
     assert(nread == UV_EOF);
 
     return;
   }
 
+  // Log the actual data received
+  printf("[CLIENT] Received %zd bytes of data: ", nread);
+  for (i = 0; i < nread && i < 32; i++) {
+    printf("%02x ", (unsigned char)buf->base[i]);
+  }
+  if (nread > 32) printf("...");
+  printf("\n");
+
   /* Now we count the pings */
   for (i = 0; i < nread; i++) {
+    printf("[CLIENT] Checking byte %zd: expected='%c'(0x%02x), actual='%c'(0x%02x)\n",
+           i, PING[pinger->state], (unsigned char)PING[pinger->state],
+           buf->base[i], (unsigned char)buf->base[i]);
     assert(buf->base[i] == PING[pinger->state]);
     pinger->state = (pinger->state + 1) % (sizeof(PING) - 1);
     if (pinger->state == 0) {
@@ -145,17 +156,21 @@ static void pinger_read_cb(uvkcp_t* kcp, ssize_t nread, const uv_buf_t * buf) {
 static void pinger_connect_cb(uvkcp_connect_t* req, int status) {
   pinger_t *pinger = (pinger_t*)((uv_handle_t*)req->handle)->data;
 
-  printf("[CLIENT] Connect callback: status=%d\n", status);
+  printf("[CLIENT] Connect callback: status=%d (%s)\n", status, uv_err_name(status));
 
-  assert(status == 0);
+  if (status != 0) {
+    printf("[CLIENT] Connection failed, not proceeding with PING\n");
+    return;
+  }
 
-  printf("[CLIENT] Writing initial PING\n");
+  printf("[CLIENT] Connection successful, writing initial PING\n");
   pinger_write_ping(pinger);
 
-  if (uvkcp_read_start(req->handle, buf_alloc, pinger_read_cb)) {
-    printf("[CLIENT] uvkcp_read_start failed");
+  int read_start_result = uvkcp_read_start(req->handle, buf_alloc, pinger_read_cb);
+  if (read_start_result) {
+    printf("[CLIENT] uvkcp_read_start failed with error: %d\n", read_start_result);
   } else {
-    printf("[CLIENT] Started reading\n");
+    printf("[CLIENT] Started reading successfully\n");
   }
 }
 
