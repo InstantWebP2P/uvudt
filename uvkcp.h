@@ -15,7 +15,7 @@ extern "C" {
 #include <stdio.h>
 
 // Debug logging
-#define UVKCP_DEBUG 1
+///#define UVKCP_DEBUG 1
 
 #ifdef UVKCP_DEBUG
 #define UVKCP_LOG(fmt, ...) printf("[UVKCP] %s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__)

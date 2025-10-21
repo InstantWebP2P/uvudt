@@ -13,7 +13,6 @@
 #include "kcp/ikcp.h"
 #include "uvkcp.h"
 
-#define KCP_DEBUG 1
 
 void kcp__stream_io(uv_poll_t *handle, int status, int events);
 
@@ -52,13 +51,15 @@ void kcp__interval_cb(uv_timer_t *timer)
 // KCP debug logging callback
 static void kcp_writelog(const char *log, ikcpcb *kcp, void *user)
 {
+#ifdef UVKCP_DEBUG
     UVKCP_LOG("[KCP DEBUG] %s", log);
+#endif
 }
 
 // KCP output function - sends data over UDP
 static int kcp_output(const char *buf, int len, ikcpcb *kcp, void *user)
 {
-    UVKCP_LOG_FUNC("kcp_output enter ...");
+    ///UVKCP_LOG_FUNC("kcp_output enter ...");
 
     kcp_context_t *ctx = (kcp_context_t *)user;
 
@@ -109,7 +110,7 @@ static int kcp_output(const char *buf, int len, ikcpcb *kcp, void *user)
     ctx->pktSentTotal++;
     ctx->bytesSentTotal += sent;
 
-    UVKCP_LOG_FUNC("kcp_output exit ...");
+    ///UVKCP_LOG_FUNC("kcp_output exit ...");
 
     // KCP expects 0 on success, not the number of bytes sent
     return 0;
@@ -1048,8 +1049,10 @@ static void tcp_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread, const 
 
                                 // Configure KCP
                                 ikcp_setoutput(ctx->kcp, kcp_output);
+#ifdef UVKCP_DEBUG
                                 ctx->kcp->writelog = kcp_writelog;
                                 ctx->kcp->logmask = IKCP_LOG_OUTPUT | IKCP_LOG_INPUT | IKCP_LOG_SEND | IKCP_LOG_RECV | IKCP_LOG_IN_DATA | IKCP_LOG_IN_ACK;
+#endif
                                 ikcp_nodelay(ctx->kcp, 1, 10, 2, 1);
                                 ikcp_wndsize(ctx->kcp, 128, 128);
                                 ikcp_setmtu(ctx->kcp, 1400);
@@ -1430,8 +1433,10 @@ static void tcp_client_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread,
                     // Configure KCP
                     ikcp_setoutput(ctx->kcp, kcp_output);
 
+#ifdef UVKCP_DEBUG
                     ctx->kcp->writelog = kcp_writelog;
                     ctx->kcp->logmask = IKCP_LOG_OUTPUT | IKCP_LOG_INPUT | IKCP_LOG_SEND | IKCP_LOG_RECV | IKCP_LOG_IN_DATA | IKCP_LOG_IN_ACK;
+#endif
 
                     ikcp_nodelay(ctx->kcp, 1, 10, 2, 1);
                     ikcp_wndsize(ctx->kcp, 128, 128);
