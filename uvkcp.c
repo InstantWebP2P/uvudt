@@ -366,15 +366,22 @@ int uvkcp_listen(uvkcp_t *stream, int backlog, uvkcp_connection_cb cb)
 // Close KCP handle
 int uvkcp_close(uvkcp_t *handle, uv_close_cb close_cb)
 {
+    UVKCP_LOG_FUNC("Closing KCP handle");
+
     kcp_context_t *ctx = (kcp_context_t *)handle->kcp_ctx;
     if (!ctx)
     {
+        UVKCP_LOG_ERROR("Invalid KCP context");
         return UV_EINVAL;
     }
+
+    // Set closing flag
+    handle->flags |= UVKCP_FLAG_CLOSING;
 
     // Stop timer
     if (ctx->timer_active)
     {
+        UVKCP_LOG("Stopping KCP interval timer");
         uv_timer_stop(&ctx->timer_handle);
         ctx->timer_active = 0;
     }
@@ -387,19 +394,29 @@ int uvkcp_close(uvkcp_t *handle, uv_close_cb close_cb)
         {
             // Get conversation ID from KCP instance
             uint32_t conv_id = ctx->kcp->conv;
+            UVKCP_LOG("Removing conversation ID %u from registry", conv_id);
             remove_conv_from_registry(ctx->server_ctx, conv_id);
         }
+        UVKCP_LOG("Releasing KCP instance");
         ikcp_release(ctx->kcp);
         ctx->kcp = NULL;
     }
 
-    // Close TCP connections for handshake
-    uv_close((uv_handle_t *)&ctx->tcp_server, NULL);
-    uv_close((uv_handle_t *)&ctx->tcp_client, NULL);
+    // Close TCP connections for handshake based on context
+    UVKCP_LOG("Closing TCP connections");
+
+    // For server contexts, close TCP server stream only
+    if (ctx->is_listening) {
+        UVKCP_LOG("Closing TCP server stream for server context");
+        uv_close((uv_handle_t *)&ctx->tcp_server, NULL);
+    }
+    // For client contexts, TCP client is already closed during handshake
+    // No need to close it again in uvkcp_close
 
     // Close UDP socket
     if (ctx->udp_fd != -1)
     {
+        UVKCP_LOG("Closing UDP socket fd=%d", ctx->udp_fd);
         close(ctx->udp_fd);
         ctx->udp_fd = -1;
     }
@@ -407,16 +424,35 @@ int uvkcp_close(uvkcp_t *handle, uv_close_cb close_cb)
     // Clean up conversation registry for server contexts
     if (ctx->is_listening)
     {
+        UVKCP_LOG("Cleaning up conversation registry");
         cleanup_conv_registry(ctx);
     }
 
+    // Stop polling
+    UVKCP_LOG("Stopping poll handle");
+    uv_poll_stop((uv_poll_t *)handle);
+
     // Free context
+    UVKCP_LOG("Freeing KCP context");
     free(ctx);
     handle->kcp_ctx = NULL;
 
     // Call stream destroy
+    UVKCP_LOG("Destroying KCP stream");
     kcp__stream_destroy(handle);
 
+    // Set closed flag
+    handle->flags |= UVKCP_FLAG_CLOSED;
+    handle->flags &= ~UVKCP_FLAG_CLOSING;
+
+    // Call close callback if provided
+    if (close_cb)
+    {
+        UVKCP_LOG("Calling close callback");
+        close_cb((uv_handle_t *)handle);
+    }
+
+    UVKCP_LOG("KCP handle closed successfully");
     return 0;
 }
 

@@ -597,6 +597,18 @@ int uvkcp_shutdown(uvkcp_shutdown_t* req, uvkcp_t* stream, uvkcp_shutdown_cb cb)
   stream->shutdown_req = req;
   stream->flags |= UVKCP_FLAG_SHUTTING;
 
+  UVKCP_LOG_FUNC("uvkcp_shutdown: Shutdown initiated");
+
+  // For KCP, we need to check if we can complete shutdown immediately
+  // If write queue is empty, we can complete shutdown right away
+  if (stream->write_queue_size == 0) {
+    UVKCP_LOG("uvkcp_shutdown: Write queue empty, completing shutdown immediately");
+    kcp__drain(stream);
+  } else {
+    UVKCP_LOG("uvkcp_shutdown: Write queue not empty (%zu bytes), waiting for drain",
+              stream->write_queue_size);
+  }
+
   return 0;
 }
 
