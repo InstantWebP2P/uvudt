@@ -68,6 +68,7 @@ struct kcp_context_s {
     uv_tcp_t tcp_server;
     uv_tcp_t tcp_client;
     uint32_t next_conv;
+    uint32_t base_conv;  // Instance-specific base for conversation ID generation
     struct uvkcp_connect_s *pending_connect_req;
 
     // Server reference for client connections (for registry cleanup)

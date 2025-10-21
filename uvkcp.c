@@ -32,27 +32,72 @@ static int remove_conv_from_registry(kcp_context_t *ctx, uint32_t conv_id);
 static void cleanup_conv_registry(kcp_context_t *ctx);
 static int conv_exists_in_registry(kcp_context_t *ctx, uint32_t conv_id);
 
+void kcp__timer_cb(uv_timer_t *timer)
+{
+    kcp_context_t *ctx = (kcp_context_t *)timer->data;
+    if (!ctx || !ctx->kcp)
+    {
+        return;
+    }
+
+    IUINT32 current = uv_now(ctx->loop);
+
+    // Update KCP state - this will flush any pending output
+    ikcp_update(ctx->kcp, current);
+
+    // Check when next update is needed
+    IUINT32 next_update = ikcp_check(ctx->kcp, current);
+
+    if (next_update == 0)
+    {
+        // Update immediately and check again
+        ikcp_update(ctx->kcp, current);
+        next_update = ikcp_check(ctx->kcp, current);
+    }
+    // Reschedule timer for next update time
+    if (next_update > 0)
+    {
+        uv_timer_start(&ctx->timer_handle, kcp__timer_cb, next_update, 0);
+        ctx->timer_active = 1;
+        UVKCP_LOG("KCP timer rescheduled, next update in %u ms", next_update);
+    }
+    else
+    {
+        ctx->timer_active = 0;
+        UVKCP_LOG("KCP timer stopped, no more updates needed");
+    }
+}
+
+// KCP debug logging callback
+static void kcp_writelog(const char *log, ikcpcb *kcp, void *user)
+{
+    UVKCP_LOG("[KCP DEBUG] %s", log);
+}
 
 // KCP output function - sends data over UDP
-static int kcp_output(const char *buf, int len, ikcpcb *kcp, void *user) {
+static int kcp_output(const char *buf, int len, ikcpcb *kcp, void *user)
+{
     UVKCP_LOG_FUNC("kcp_output enter ...");
 
     kcp_context_t *ctx = (kcp_context_t *)user;
 
-    if (ctx->udp_fd == -1) {
+    if (ctx->udp_fd == -1)
+    {
         return -1;
     }
 
     // Try to send immediately
     ssize_t sent = sendto(ctx->udp_fd, buf, len, 0,
-                         (struct sockaddr *)&ctx->peer_addr,
-                         ctx->peer_addr_len);
+                          (struct sockaddr *)&ctx->peer_addr,
+                          ctx->peer_addr_len);
 
-    if (sent < 0) {
+    if (sent < 0)
+    {
         // If EAGAIN/EWOULDBLOCK, we need to ensure writable event monitoring
         // KCP will handle retransmission, but we need to make sure the socket
         // is being monitored for writable events so we can flush pending data
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+        {
             // Find the uvkcp_t handle that contains this KCP context
             // Since uvkcp_t inherits from uv_poll_t, we need to search for it
             // For now, we'll rely on the KCP timer to retry later
@@ -74,12 +119,14 @@ static int kcp_output(const char *buf, int len, ikcpcb *kcp, void *user) {
 }
 
 // Initialize KCP handle
-int uvkcp_init(uv_loop_t *loop, uvkcp_t *handle) {
+int uvkcp_init(uv_loop_t *loop, uvkcp_t *handle)
+{
     UVKCP_LOG_FUNC("Initializing KCP handle");
 
     static int _initialized = 0;
 
-    if (!_initialized) {
+    if (!_initialized)
+    {
         // KCP library initialization if needed
         _initialized = 1;
         UVKCP_LOG("KCP library initialized");
@@ -90,7 +137,8 @@ int uvkcp_init(uv_loop_t *loop, uvkcp_t *handle) {
 
     // Allocate KCP context
     kcp_context_t *ctx = (kcp_context_t *)malloc(sizeof(kcp_context_t));
-    if (!ctx) {
+    if (!ctx)
+    {
         UVKCP_LOG_ERROR("Failed to allocate KCP context");
         return UV_ENOMEM;
     }
@@ -122,7 +170,8 @@ int uvkcp_init(uv_loop_t *loop, uvkcp_t *handle) {
     ctx->conv_registry = NULL;
 
     // Initialize timer handle
-    if (uv_timer_init(loop, &ctx->timer_handle) < 0) {
+    if (uv_timer_init(loop, &ctx->timer_handle) < 0)
+    {
         UVKCP_LOG_ERROR("Failed to initialize timer");
         free(ctx);
         return UV_ENOMEM;
@@ -137,9 +186,11 @@ int uvkcp_init(uv_loop_t *loop, uvkcp_t *handle) {
 }
 
 // Open KCP handle with existing UDP socket
-int uvkcp_open(uvkcp_t *handle, uv_os_sock_t sock) {
+int uvkcp_open(uvkcp_t *handle, uv_os_sock_t sock)
+{
     kcp_context_t *ctx = (kcp_context_t *)handle->kcp_ctx;
-    if (!ctx) {
+    if (!ctx)
+    {
         return UV_EINVAL;
     }
 
@@ -154,17 +205,20 @@ int uvkcp_open(uvkcp_t *handle, uv_os_sock_t sock) {
 }
 
 // Bind KCP to address
-int uvkcp_bind(uvkcp_t *handle, const struct sockaddr *addr, int reuseaddr, int reuseable) {
+int uvkcp_bind(uvkcp_t *handle, const struct sockaddr *addr, int reuseaddr, int reuseable)
+{
     UVKCP_LOG_FUNC("Binding KCP handle");
 
     kcp_context_t *ctx = (kcp_context_t *)handle->kcp_ctx;
-    if (!ctx) {
+    if (!ctx)
+    {
         UVKCP_LOG_ERROR("Invalid KCP context");
         return UV_EINVAL;
     }
 
     // Initialize TCP server for handshake
-    if (uv_tcp_init(ctx->loop, &ctx->tcp_server) < 0) {
+    if (uv_tcp_init(ctx->loop, &ctx->tcp_server) < 0)
+    {
         UVKCP_LOG_ERROR("Failed to initialize TCP server");
         return UV_ENOMEM;
     }
@@ -172,17 +226,20 @@ int uvkcp_bind(uvkcp_t *handle, const struct sockaddr *addr, int reuseaddr, int 
     ctx->tcp_server.data = handle;
 
     // Set TCP socket options
-    if (reuseaddr) {
+    if (reuseaddr)
+    {
         // Set SO_REUSEADDR on TCP socket
         uv_tcp_t *tcp = &ctx->tcp_server;
-        if (uv_tcp_keepalive(tcp, 1, 60) != 0) {
+        if (uv_tcp_keepalive(tcp, 1, 60) != 0)
+        {
             UVKCP_LOG("Failed to set TCP keepalive");
         }
         UVKCP_LOG("Set SO_REUSEADDR on TCP handshake socket");
     }
 
     // Bind TCP server to the specified address
-    if (uv_tcp_bind(&ctx->tcp_server, addr, 0) < 0) {
+    if (uv_tcp_bind(&ctx->tcp_server, addr, 0) < 0)
+    {
         UVKCP_LOG_ERROR("Failed to bind TCP server");
         uv_close((uv_handle_t *)&ctx->tcp_server, NULL);
         return uv_translate_sys_error(errno);
@@ -190,8 +247,7 @@ int uvkcp_bind(uvkcp_t *handle, const struct sockaddr *addr, int reuseaddr, int 
 
     // Store the server address for later use
     memcpy(&ctx->server_addr, addr, sizeof(ctx->server_addr));
-    ctx->server_addr_len = (addr->sa_family == AF_INET) ?
-                          sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6);
+    ctx->server_addr_len = (addr->sa_family == AF_INET) ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6);
 
     // UDP socket will be created later for each client connection
     ctx->udp_fd = -1;
@@ -201,11 +257,13 @@ int uvkcp_bind(uvkcp_t *handle, const struct sockaddr *addr, int reuseaddr, int 
 }
 
 // Connect to remote address
-int uvkcp_connect(uvkcp_connect_t *req, uvkcp_t *handle, const struct sockaddr *addr, uvkcp_connect_cb cb) {
+int uvkcp_connect(uvkcp_connect_t *req, uvkcp_t *handle, const struct sockaddr *addr, uvkcp_connect_cb cb)
+{
     UVKCP_LOG_FUNC("Connecting KCP handle");
 
     kcp_context_t *ctx = (kcp_context_t *)handle->kcp_ctx;
-    if (!ctx) {
+    if (!ctx)
+    {
         UVKCP_LOG_ERROR("Invalid KCP context");
         return UV_EINVAL;
     }
@@ -223,11 +281,11 @@ int uvkcp_connect(uvkcp_connect_t *req, uvkcp_t *handle, const struct sockaddr *
 
     // Store the server address for use in TCP connect callback
     memcpy(&ctx->server_addr, addr, sizeof(ctx->server_addr));
-    ctx->server_addr_len = (addr->sa_family == AF_INET) ?
-                          sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6);
+    ctx->server_addr_len = (addr->sa_family == AF_INET) ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6);
 
     // Initialize TCP client for handshake
-    if (uv_tcp_init(ctx->loop, &ctx->tcp_client) < 0) {
+    if (uv_tcp_init(ctx->loop, &ctx->tcp_client) < 0)
+    {
         UVKCP_LOG_ERROR("Failed to initialize TCP client");
         return UV_ENOMEM;
     }
@@ -236,7 +294,8 @@ int uvkcp_connect(uvkcp_connect_t *req, uvkcp_t *handle, const struct sockaddr *
 
     // Connect to TCP server for handshake
     uv_connect_t *tcp_connect_req = malloc(sizeof(uv_connect_t));
-    if (!tcp_connect_req) {
+    if (!tcp_connect_req)
+    {
         UVKCP_LOG_ERROR("Failed to allocate TCP connect request");
         return UV_ENOMEM;
     }
@@ -244,7 +303,8 @@ int uvkcp_connect(uvkcp_connect_t *req, uvkcp_t *handle, const struct sockaddr *
     tcp_connect_req->data = ctx;
 
     int r = uv_tcp_connect(tcp_connect_req, &ctx->tcp_client, addr, tcp_connect_cb);
-    if (r != 0) {
+    if (r != 0)
+    {
         UVKCP_LOG_ERROR("Failed to connect to TCP server: %d", r);
         free(tcp_connect_req);
         return r;
@@ -255,19 +315,23 @@ int uvkcp_connect(uvkcp_connect_t *req, uvkcp_t *handle, const struct sockaddr *
 }
 
 // Listen for incoming connections
-int uvkcp_listen(uvkcp_t *stream, int backlog, uvkcp_connection_cb cb) {
+int uvkcp_listen(uvkcp_t *stream, int backlog, uvkcp_connection_cb cb)
+{
     kcp_context_t *ctx = (kcp_context_t *)stream->kcp_ctx;
-    if (!ctx) {
+    if (!ctx)
+    {
         return UV_EINVAL;
     }
 
-    if (ctx->is_connected) {
+    if (ctx->is_connected)
+    {
         UVKCP_LOG_ERROR("KCP handle already connected, cannot listen");
         return UV_EISCONN;
     }
 
     // Check if TCP server is already bound
-    if (ctx->tcp_server.loop == NULL) {
+    if (ctx->tcp_server.loop == NULL)
+    {
         UVKCP_LOG_ERROR("KCP handle not bound to TCP socket, call uvkcp_bind first");
         return UV_EINVAL;
     }
@@ -282,7 +346,8 @@ int uvkcp_listen(uvkcp_t *stream, int backlog, uvkcp_connection_cb cb) {
 
     // Start listening on TCP server
     int r = uv_listen((uv_stream_t *)&ctx->tcp_server, backlog, tcp_connection_cb);
-    if (r != 0) {
+    if (r != 0)
+    {
         UVKCP_LOG_ERROR("Failed to listen on TCP server: %d", r);
         return r;
     }
@@ -292,22 +357,27 @@ int uvkcp_listen(uvkcp_t *stream, int backlog, uvkcp_connection_cb cb) {
 }
 
 // Close KCP handle
-int uvkcp_close(uvkcp_t *handle, uv_close_cb close_cb) {
+int uvkcp_close(uvkcp_t *handle, uv_close_cb close_cb)
+{
     kcp_context_t *ctx = (kcp_context_t *)handle->kcp_ctx;
-    if (!ctx) {
+    if (!ctx)
+    {
         return UV_EINVAL;
     }
 
     // Stop timer
-    if (ctx->timer_active) {
+    if (ctx->timer_active)
+    {
         uv_timer_stop(&ctx->timer_handle);
         ctx->timer_active = 0;
     }
 
     // Cleanup KCP
-    if (ctx->kcp) {
+    if (ctx->kcp)
+    {
         // Remove conversation ID from registry if this is a client connection
-        if (ctx->is_connected && !ctx->is_listening && ctx->server_ctx) {
+        if (ctx->is_connected && !ctx->is_listening && ctx->server_ctx)
+        {
             // Get conversation ID from KCP instance
             uint32_t conv_id = ctx->kcp->conv;
             remove_conv_from_registry(ctx->server_ctx, conv_id);
@@ -321,13 +391,15 @@ int uvkcp_close(uvkcp_t *handle, uv_close_cb close_cb) {
     uv_close((uv_handle_t *)&ctx->tcp_client, NULL);
 
     // Close UDP socket
-    if (ctx->udp_fd != -1) {
+    if (ctx->udp_fd != -1)
+    {
         close(ctx->udp_fd);
         ctx->udp_fd = -1;
     }
 
     // Clean up conversation registry for server contexts
-    if (ctx->is_listening) {
+    if (ctx->is_listening)
+    {
         cleanup_conv_registry(ctx);
     }
 
@@ -342,9 +414,11 @@ int uvkcp_close(uvkcp_t *handle, uv_close_cb close_cb) {
 }
 
 // Set KCP nodelay option
-int uvkcp_nodelay(uvkcp_t *handle, int enable, int interval, int resend, int nc) {
+int uvkcp_nodelay(uvkcp_t *handle, int enable, int interval, int resend, int nc)
+{
     kcp_context_t *ctx = (kcp_context_t *)handle->kcp_ctx;
-    if (!ctx || !ctx->kcp) {
+    if (!ctx || !ctx->kcp)
+    {
         return UV_EINVAL;
     }
 
@@ -353,9 +427,11 @@ int uvkcp_nodelay(uvkcp_t *handle, int enable, int interval, int resend, int nc)
 }
 
 // Set KCP window size
-int uvkcp_wndsize(uvkcp_t *handle, int sndwnd, int rcvwnd) {
+int uvkcp_wndsize(uvkcp_t *handle, int sndwnd, int rcvwnd)
+{
     kcp_context_t *ctx = (kcp_context_t *)handle->kcp_ctx;
-    if (!ctx || !ctx->kcp) {
+    if (!ctx || !ctx->kcp)
+    {
         return UV_EINVAL;
     }
 
@@ -364,9 +440,11 @@ int uvkcp_wndsize(uvkcp_t *handle, int sndwnd, int rcvwnd) {
 }
 
 // Set KCP MTU
-int uvkcp_setmtu(uvkcp_t *handle, int mtu) {
+int uvkcp_setmtu(uvkcp_t *handle, int mtu)
+{
     kcp_context_t *ctx = (kcp_context_t *)handle->kcp_ctx;
-    if (!ctx || !ctx->kcp) {
+    if (!ctx || !ctx->kcp)
+    {
         return UV_EINVAL;
     }
 
@@ -375,39 +453,47 @@ int uvkcp_setmtu(uvkcp_t *handle, int mtu) {
 }
 
 // Translate KCP error to libuv error
-int uvkcp_translate_kcp_error(void) {
+int uvkcp_translate_kcp_error(void)
+{
     // KCP doesn't have detailed error codes, return generic error
     return UV_EIO;
 }
 
 // Stub implementations for missing functions
-int uvkcp_keepalive(uvkcp_t *handle, int enable, unsigned int delay) {
+int uvkcp_keepalive(uvkcp_t *handle, int enable, unsigned int delay)
+{
     // KCP doesn't support keepalive in the same way as TCP
     return 0;
 }
 
-int uvkcp_getsockname(const uvkcp_t* handle, struct sockaddr* name, int* namelen) {
+int uvkcp_getsockname(const uvkcp_t *handle, struct sockaddr *name, int *namelen)
+{
     kcp_context_t *ctx = (kcp_context_t *)handle->kcp_ctx;
-    if (!ctx || ctx->udp_fd == -1) {
+    if (!ctx || ctx->udp_fd == -1)
+    {
         return UV_EINVAL;
     }
 
     socklen_t len = *namelen;
-    if (getsockname(ctx->udp_fd, name, &len) < 0) {
+    if (getsockname(ctx->udp_fd, name, &len) < 0)
+    {
         return uv_translate_sys_error(errno);
     }
     *namelen = len;
     return 0;
 }
 
-int uvkcp_getpeername(const uvkcp_t *handle, struct sockaddr *name, int *namelen) {
+int uvkcp_getpeername(const uvkcp_t *handle, struct sockaddr *name, int *namelen)
+{
     kcp_context_t *ctx = (kcp_context_t *)handle->kcp_ctx;
-    if (!ctx || !ctx->is_connected) {
+    if (!ctx || !ctx->is_connected)
+    {
         return UV_ENOTCONN;
     }
 
     socklen_t len = *namelen;
-    if (len > ctx->peer_addr_len) {
+    if (len > ctx->peer_addr_len)
+    {
         len = ctx->peer_addr_len;
     }
     memcpy(name, &ctx->peer_addr, len);
@@ -415,11 +501,11 @@ int uvkcp_getpeername(const uvkcp_t *handle, struct sockaddr *name, int *namelen
     return 0;
 }
 
-
-
-int uvkcp_getperf(uvkcp_t *handle, uvkcp_netperf_t *perf, int clear) {
+int uvkcp_getperf(uvkcp_t *handle, uvkcp_netperf_t *perf, int clear)
+{
     kcp_context_t *ctx = (kcp_context_t *)handle->kcp_ctx;
-    if (!ctx || !ctx->kcp) {
+    if (!ctx || !ctx->kcp)
+    {
         return UV_EINVAL;
     }
 
@@ -433,18 +519,20 @@ int uvkcp_getperf(uvkcp_t *handle, uvkcp_netperf_t *perf, int clear) {
     perf->pktSndLossTotal = ctx->pktSndLossTotal;
     perf->pktRcvLossTotal = ctx->pktRcvLossTotal;
     perf->pktRetransTotal = ctx->pktRetransTotal;
-    perf->pktSentACKTotal = 0; // KCP handles ACKs internally
-    perf->pktRecvACKTotal = 0; // KCP handles ACKs internally
-    perf->pktSentNAKTotal = 0; // KCP doesn't use NAK
-    perf->pktRecvNAKTotal = 0; // KCP doesn't use NAK
+    perf->pktSentACKTotal = 0;    // KCP handles ACKs internally
+    perf->pktRecvACKTotal = 0;    // KCP handles ACKs internally
+    perf->pktSentNAKTotal = 0;    // KCP doesn't use NAK
+    perf->pktRecvNAKTotal = 0;    // KCP doesn't use NAK
     perf->usSndDurationTotal = 0; // Not tracked currently
 
     // Calculate rates (simplified)
     IUINT32 current = uv_now(ctx->loop);
     IUINT32 timeDiff = current - ctx->lastUpdateTime;
-    if (timeDiff > 0) {
+    if (timeDiff > 0)
+    {
         double timeSec = timeDiff / 1000.0;
-        if (timeSec > 0) {
+        if (timeSec > 0)
+        {
             perf->mbpsSendRate = (ctx->bytesSentTotal * 8.0) / (timeSec * 1000000.0);
             perf->mbpsRecvRate = (ctx->bytesRecvTotal * 8.0) / (timeSec * 1000000.0);
         }
@@ -454,7 +542,8 @@ int uvkcp_getperf(uvkcp_t *handle, uvkcp_netperf_t *perf, int clear) {
     ctx->lastUpdateTime = current;
 
     // Clear statistics if requested
-    if (clear) {
+    if (clear)
+    {
         ctx->pktSentTotal = 0;
         ctx->pktRecvTotal = 0;
         ctx->pktSndLossTotal = 0;
@@ -469,7 +558,8 @@ int uvkcp_getperf(uvkcp_t *handle, uvkcp_netperf_t *perf, int clear) {
 // Server/Client style KCP implementation with TCP handshake
 
 // Simple conversation registry entry
-struct conv_registry_entry_s {
+struct conv_registry_entry_s
+{
     uint32_t conv_id;
     uvkcp_t *handle;
     struct conv_registry_entry_s *next;
@@ -480,30 +570,37 @@ typedef struct conv_registry_entry_s conv_registry_entry_t;
 #define CONV_REGISTRY_SIZE 256
 
 // Initialize conversation registry
-static void init_conv_registry(kcp_context_t *ctx) {
-    if (ctx->conv_registry == NULL) {
-        ctx->conv_registry = calloc(CONV_REGISTRY_SIZE, sizeof(conv_registry_entry_t*));
+static void init_conv_registry(kcp_context_t *ctx)
+{
+    if (ctx->conv_registry == NULL)
+    {
+        ctx->conv_registry = calloc(CONV_REGISTRY_SIZE, sizeof(conv_registry_entry_t *));
     }
 }
 
 // Hash function for conversation ID
-static unsigned int conv_hash(uint32_t conv_id) {
+static unsigned int conv_hash(uint32_t conv_id)
+{
     return conv_id % CONV_REGISTRY_SIZE;
 }
 
 // Add conversation ID to registry
-static int add_conv_to_registry(kcp_context_t *ctx, uint32_t conv_id, uvkcp_t *handle) {
-    if (!ctx->conv_registry) {
+static int add_conv_to_registry(kcp_context_t *ctx, uint32_t conv_id, uvkcp_t *handle)
+{
+    if (!ctx->conv_registry)
+    {
         init_conv_registry(ctx);
     }
 
     unsigned int hash = conv_hash(conv_id);
-    conv_registry_entry_t **bucket = (conv_registry_entry_t**)ctx->conv_registry + hash;
+    conv_registry_entry_t **bucket = (conv_registry_entry_t **)ctx->conv_registry + hash;
 
     // Check for existing entry
     conv_registry_entry_t *entry = *bucket;
-    while (entry) {
-        if (entry->conv_id == conv_id) {
+    while (entry)
+    {
+        if (entry->conv_id == conv_id)
+        {
             UVKCP_LOG_ERROR("Conversation ID %u already exists in registry", conv_id);
             return -1; // Conflict detected
         }
@@ -512,7 +609,8 @@ static int add_conv_to_registry(kcp_context_t *ctx, uint32_t conv_id, uvkcp_t *h
 
     // Add new entry
     entry = malloc(sizeof(conv_registry_entry_t));
-    if (!entry) {
+    if (!entry)
+    {
         UVKCP_LOG_ERROR("Failed to allocate conversation registry entry for conv %u", conv_id);
         return -1;
     }
@@ -526,22 +624,29 @@ static int add_conv_to_registry(kcp_context_t *ctx, uint32_t conv_id, uvkcp_t *h
 }
 
 // Remove conversation ID from registry
-static int remove_conv_from_registry(kcp_context_t *ctx, uint32_t conv_id) {
-    if (!ctx->conv_registry) {
+static int remove_conv_from_registry(kcp_context_t *ctx, uint32_t conv_id)
+{
+    if (!ctx->conv_registry)
+    {
         UVKCP_LOG_ERROR("Cannot remove conversation ID %u - registry not initialized", conv_id);
         return -1;
     }
 
     unsigned int hash = conv_hash(conv_id);
-    conv_registry_entry_t **bucket = (conv_registry_entry_t**)ctx->conv_registry + hash;
+    conv_registry_entry_t **bucket = (conv_registry_entry_t **)ctx->conv_registry + hash;
     conv_registry_entry_t *prev = NULL;
     conv_registry_entry_t *entry = *bucket;
 
-    while (entry) {
-        if (entry->conv_id == conv_id) {
-            if (prev) {
+    while (entry)
+    {
+        if (entry->conv_id == conv_id)
+        {
+            if (prev)
+            {
                 prev->next = entry->next;
-            } else {
+            }
+            else
+            {
                 *bucket = entry->next;
             }
             free(entry);
@@ -557,18 +662,22 @@ static int remove_conv_from_registry(kcp_context_t *ctx, uint32_t conv_id) {
 }
 
 // Clean up entire conversation registry
-static void cleanup_conv_registry(kcp_context_t *ctx) {
-    if (!ctx->conv_registry) {
+static void cleanup_conv_registry(kcp_context_t *ctx)
+{
+    if (!ctx->conv_registry)
+    {
         UVKCP_LOG("No conversation registry to clean up");
         return;
     }
 
     int total_entries = 0;
     int i;
-    for (i = 0; i < CONV_REGISTRY_SIZE; i++) {
-        conv_registry_entry_t **bucket = (conv_registry_entry_t**)ctx->conv_registry + i;
+    for (i = 0; i < CONV_REGISTRY_SIZE; i++)
+    {
+        conv_registry_entry_t **bucket = (conv_registry_entry_t **)ctx->conv_registry + i;
         conv_registry_entry_t *entry = *bucket;
-        while (entry) {
+        while (entry)
+        {
             conv_registry_entry_t *next = entry->next;
             free(entry);
             entry = next;
@@ -584,16 +693,20 @@ static void cleanup_conv_registry(kcp_context_t *ctx) {
 }
 
 // Check if conversation ID exists in registry
-static int conv_exists_in_registry(kcp_context_t *ctx, uint32_t conv_id) {
-    if (!ctx->conv_registry) {
+static int conv_exists_in_registry(kcp_context_t *ctx, uint32_t conv_id)
+{
+    if (!ctx->conv_registry)
+    {
         return 0;
     }
 
     unsigned int hash = conv_hash(conv_id);
-    conv_registry_entry_t *bucket = *((conv_registry_entry_t**)ctx->conv_registry + hash);
+    conv_registry_entry_t *bucket = *((conv_registry_entry_t **)ctx->conv_registry + hash);
 
-    while (bucket) {
-        if (bucket->conv_id == conv_id) {
+    while (bucket)
+    {
+        if (bucket->conv_id == conv_id)
+        {
             return 1;
         }
         bucket = bucket->next;
@@ -603,12 +716,13 @@ static int conv_exists_in_registry(kcp_context_t *ctx, uint32_t conv_id) {
 }
 
 // Helper function to generate random conversation ID with conflict detection
-static uint32_t generate_conv_id(kcp_context_t *ctx) {
-    // Start with a random base to avoid predictable conversation IDs
-    static uint32_t base_conv = 0;
-    if (base_conv == 0) {
-        base_conv = (uint32_t)rand() | 0x10000000; // Ensure non-zero and high bit set
-        UVKCP_LOG("Initialized conversation ID base: %u", base_conv);
+static uint32_t generate_conv_id(kcp_context_t *ctx)
+{
+    // Use instance-specific base to avoid conflicts between server instances
+    if (ctx->base_conv == 0)
+    {
+        ctx->base_conv = (uint32_t)rand() | 0x10000000; // Ensure non-zero and high bit set
+        UVKCP_LOG("Initialized conversation ID base: %u", ctx->base_conv);
     }
 
     // Generate conversation ID with conflict detection
@@ -616,18 +730,21 @@ static uint32_t generate_conv_id(kcp_context_t *ctx) {
     int attempts = 100; // Prevent infinite loop
     int conflicts = 0;
 
-    do {
-        conv = base_conv + ctx->next_conv;
+    do
+    {
+        conv = ctx->base_conv + ctx->next_conv;
         ctx->next_conv++;
 
         // Wrap around if needed (avoid 0 which is reserved for handshake requests)
-        if (ctx->next_conv > 0x0FFFFFFF) {
+        if (ctx->next_conv > 0x0FFFFFFF)
+        {
             ctx->next_conv = 1;
-            base_conv = (uint32_t)rand() | 0x10000000;
-            UVKCP_LOG("Wrapped conversation ID counter, new base: %u", base_conv);
+            ctx->base_conv = (uint32_t)rand() | 0x10000000;
+            UVKCP_LOG("Wrapped conversation ID counter, new base: %u", ctx->base_conv);
         }
 
-        if (conv_exists_in_registry(ctx, conv)) {
+        if (conv_exists_in_registry(ctx, conv))
+        {
             conflicts++;
             UVKCP_LOG("Conversation ID conflict detected: %u (attempt %d)", conv, attempts);
         }
@@ -635,13 +752,18 @@ static uint32_t generate_conv_id(kcp_context_t *ctx) {
         attempts--;
     } while (conv_exists_in_registry(ctx, conv) && attempts > 0);
 
-    if (attempts <= 0) {
-        // Fallback: use timestamp-based ID
-        conv = (uint32_t)uv_now(ctx->loop) ^ (uint32_t)rand();
+    if (attempts <= 0)
+    {
+        // Fallback: use timestamp-based ID with more entropy
+        conv = (uint32_t)uv_now(ctx->loop) ^ (uint32_t)rand() ^ (uint32_t)((uintptr_t)ctx);
         UVKCP_LOG("Used fallback conversation ID: %u (after %d conflicts)", conv, conflicts);
-    } else if (conflicts > 0) {
+    }
+    else if (conflicts > 0)
+    {
         UVKCP_LOG("Generated conversation ID: %u (resolved %d conflicts)", conv, conflicts);
-    } else {
+    }
+    else
+    {
         UVKCP_LOG("Generated conversation ID: %u", conv);
     }
 
@@ -649,24 +771,29 @@ static uint32_t generate_conv_id(kcp_context_t *ctx) {
 }
 
 // Helper function to get current timestamp
-static uint32_t get_timestamp(void) {
+static uint32_t get_timestamp(void)
+{
     return (uint32_t)(uv_now(uv_default_loop()) / 1000);
 }
 
 // Helper function to generate random nonce
-static uint32_t generate_nonce(void) {
+static uint32_t generate_nonce(void)
+{
     return (uint32_t)rand();
 }
 
 // Helper function to set socket to non-blocking mode
-static int set_socket_nonblocking(int sock) {
+static int set_socket_nonblocking(int sock)
+{
     int flags = fcntl(sock, F_GETFL, 0);
-    if (flags == -1) {
+    if (flags == -1)
+    {
         UVKCP_LOG_ERROR("Failed to get socket flags: %s", strerror(errno));
         return -1;
     }
 
-    if (fcntl(sock, F_SETFL, flags | O_NONBLOCK) == -1) {
+    if (fcntl(sock, F_SETFL, flags | O_NONBLOCK) == -1)
+    {
         UVKCP_LOG_ERROR("Failed to set socket non-blocking: %s", strerror(errno));
         return -1;
     }
@@ -676,14 +803,17 @@ static int set_socket_nonblocking(int sock) {
 }
 
 // Simple alloc function for TCP handshake
-static void echo_alloc(uv_handle_t* handle, size_t suggested_size, uv_buf_t* buf) {
+static void echo_alloc(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf)
+{
     buf->base = malloc(suggested_size);
     buf->len = suggested_size;
 }
 
 // TCP connection callback for server
-static void tcp_connection_cb(uv_stream_t *server, int status) {
-    if (status != 0) {
+static void tcp_connection_cb(uv_stream_t *server, int status)
+{
+    if (status != 0)
+    {
         UVKCP_LOG_ERROR("TCP connection error: %d", status);
         return;
     }
@@ -692,12 +822,14 @@ static void tcp_connection_cb(uv_stream_t *server, int status) {
     kcp_context_t *server_ctx = (kcp_context_t *)kcp_server->kcp_ctx;
 
     uv_tcp_t *tcp_client = malloc(sizeof(uv_tcp_t));
-    if (!tcp_client) {
+    if (!tcp_client)
+    {
         UVKCP_LOG_ERROR("Failed to allocate TCP client");
         return;
     }
 
-    if (uv_tcp_init(server_ctx->loop, tcp_client) < 0) {
+    if (uv_tcp_init(server_ctx->loop, tcp_client) < 0)
+    {
         UVKCP_LOG_ERROR("Failed to initialize TCP client");
         free(tcp_client);
         return;
@@ -705,29 +837,35 @@ static void tcp_connection_cb(uv_stream_t *server, int status) {
 
     tcp_client->data = kcp_server;
 
-    if (uv_accept(server, (uv_stream_t *)tcp_client) == 0) {
+    if (uv_accept(server, (uv_stream_t *)tcp_client) == 0)
+    {
         UVKCP_LOG("Accepted TCP connection for KCP handshake");
 
         // Start reading handshake request
         uv_read_start((uv_stream_t *)tcp_client,
-                     (uv_alloc_cb)echo_alloc,
-                     tcp_handshake_read_cb);
-    } else {
+                      (uv_alloc_cb)echo_alloc,
+                      tcp_handshake_read_cb);
+    }
+    else
+    {
         UVKCP_LOG_ERROR("Failed to accept TCP connection");
         uv_close((uv_handle_t *)tcp_client, NULL);
     }
 }
 
 // TCP read callback for handshake
-static void tcp_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread, const uv_buf_t *buf) {
-    if (nread < 0) {
+static void tcp_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread, const uv_buf_t *buf)
+{
+    if (nread < 0)
+    {
         UVKCP_LOG_ERROR("TCP handshake read error: %zd", nread);
         free(buf->base);
         uv_close((uv_handle_t *)tcp_client, NULL);
         return;
     }
 
-    if (nread == sizeof(kcp_handshake_t)) {
+    if (nread == sizeof(kcp_handshake_t))
+    {
         kcp_handshake_t *handshake = (kcp_handshake_t *)buf->base;
         uvkcp_t *kcp_server = (uvkcp_t *)tcp_client->data;
         kcp_context_t *server_ctx = (kcp_context_t *)kcp_server->kcp_ctx;
@@ -745,17 +883,25 @@ static void tcp_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread, const 
         // UDP socket will be created later for each client connection
         struct sockaddr_storage server_addr;
         socklen_t server_addr_len = sizeof(server_addr);
-        if (getsockname(server_ctx->tcp_server.io_watcher.fd, (struct sockaddr*)&server_addr, &server_addr_len) == 0) {
-            if (server_addr.ss_family == AF_INET) {
-                struct sockaddr_in *addr_in = (struct sockaddr_in*)&server_addr;
+        if (getsockname(server_ctx->tcp_server.io_watcher.fd, (struct sockaddr *)&server_addr, &server_addr_len) == 0)
+        {
+            if (server_addr.ss_family == AF_INET)
+            {
+                struct sockaddr_in *addr_in = (struct sockaddr_in *)&server_addr;
                 response.udp_port = addr_in->sin_port;
-            } else if (server_addr.ss_family == AF_INET6) {
-                struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6*)&server_addr;
+            }
+            else if (server_addr.ss_family == AF_INET6)
+            {
+                struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)&server_addr;
                 response.udp_port = addr_in6->sin6_port;
-            } else {
+            }
+            else
+            {
                 response.udp_port = 0;
             }
-        } else {
+        }
+        else
+        {
             response.udp_port = 0;
         }
 
@@ -775,37 +921,46 @@ static void tcp_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread, const 
         UVKCP_LOG("Sent KCP handshake response: conv=%u", ntohl(response.conv));
 
         // For server mode, we need to create a KCP object and call the connection callback
-        if (kcp_server && kcp_server->connection_cb) {
+        if (kcp_server && kcp_server->connection_cb)
+        {
             // Create a new KCP handle for the accepted connection
             uvkcp_t *client = malloc(sizeof(uvkcp_t));
-            if (client) {
-                if (uvkcp_init(kcp_server->aloop, client) == 0) {
+            if (client)
+            {
+                if (uvkcp_init(kcp_server->aloop, client) == 0)
+                {
                     kcp_context_t *ctx = (kcp_context_t *)client->kcp_ctx;
-                    if (ctx) {
+                    if (ctx)
+                    {
                         // Create UDP socket for KCP communication
                         int domain = (handshake->addr_family == AF_INET) ? AF_INET : AF_INET6;
                         int sock = socket(domain, SOCK_DGRAM, 0);
-                        if (sock >= 0) {
+                        if (sock >= 0)
+                        {
                             // Bind the server socket to any available port
                             struct sockaddr_storage bind_addr;
                             socklen_t bind_addr_len = sizeof(bind_addr);
                             memset(&bind_addr, 0, sizeof(bind_addr));
 
-                            if (domain == AF_INET) {
-                                struct sockaddr_in *addr_in = (struct sockaddr_in*)&bind_addr;
+                            if (domain == AF_INET)
+                            {
+                                struct sockaddr_in *addr_in = (struct sockaddr_in *)&bind_addr;
                                 addr_in->sin_family = AF_INET;
                                 addr_in->sin_addr.s_addr = INADDR_ANY;
                                 addr_in->sin_port = 0; // Let OS assign port
                                 bind_addr_len = sizeof(struct sockaddr_in);
-                            } else {
-                                struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6*)&bind_addr;
+                            }
+                            else
+                            {
+                                struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)&bind_addr;
                                 addr_in6->sin6_family = AF_INET6;
                                 addr_in6->sin6_addr = in6addr_any;
                                 addr_in6->sin6_port = 0; // Let OS assign port
                                 bind_addr_len = sizeof(struct sockaddr_in6);
                             }
 
-                            if (bind(sock, (struct sockaddr*)&bind_addr, bind_addr_len) < 0) {
+                            if (bind(sock, (struct sockaddr *)&bind_addr, bind_addr_len) < 0)
+                            {
                                 UVKCP_LOG_ERROR("Failed to bind server UDP socket: %s", strerror(errno));
                                 close(sock);
                                 ctx->is_connected = 0; // Reset connection state on failure
@@ -815,7 +970,8 @@ static void tcp_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread, const 
                             }
 
                             // Set socket to non-blocking mode for libuv integration
-                            if (set_socket_nonblocking(sock) != 0) {
+                            if (set_socket_nonblocking(sock) != 0)
+                            {
                                 UVKCP_LOG_ERROR("Failed to set server UDP socket non-blocking");
                                 close(sock);
                                 ctx->is_connected = 0; // Reset connection state on failure
@@ -828,30 +984,37 @@ static void tcp_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread, const 
                             // Create KCP instance with assigned conversation ID
                             uint32_t conv_id = ntohl(response.conv);
                             ctx->kcp = ikcp_create(conv_id, ctx);
-                            if (ctx->kcp) {
+                            if (ctx->kcp)
+                            {
                                 // Set server context reference for registry cleanup
                                 ctx->server_ctx = server_ctx;
 
                                 // Register conversation ID in registry
-                                if (add_conv_to_registry(server_ctx, conv_id, client) != 0) {
+                                if (add_conv_to_registry(server_ctx, conv_id, client) != 0)
+                                {
                                     UVKCP_LOG_ERROR("Failed to register conversation ID %u in registry", conv_id);
                                     // Continue anyway, but log the error
                                 }
 
                                 // Configure KCP
                                 ikcp_setoutput(ctx->kcp, kcp_output);
+                                ctx->kcp->writelog = kcp_writelog;
+                                ctx->kcp->logmask = 0xffffffff; /// IKCP_LOG_OUTPUT | IKCP_LOG_INPUT | IKCP_LOG_SEND | IKCP_LOG_RECV | IKCP_LOG_IN_DATA | IKCP_LOG_IN_ACK;
                                 ikcp_nodelay(ctx->kcp, 1, 10, 2, 1);
                                 ikcp_wndsize(ctx->kcp, 128, 128);
                                 ikcp_setmtu(ctx->kcp, 1400);
 
                                 // Set peer address from handshake
-                                if (handshake->addr_family == AF_INET) {
+                                if (handshake->addr_family == AF_INET)
+                                {
                                     struct sockaddr_in *peer = (struct sockaddr_in *)&ctx->peer_addr;
                                     peer->sin_family = AF_INET;
                                     peer->sin_port = handshake->udp_port;
                                     memcpy(&peer->sin_addr, handshake->peer_addr, 4);
                                     ctx->peer_addr_len = sizeof(struct sockaddr_in);
-                                } else {
+                                }
+                                else
+                                {
                                     struct sockaddr_in6 *peer = (struct sockaddr_in6 *)&ctx->peer_addr;
                                     peer->sin6_family = AF_INET6;
                                     peer->sin6_port = handshake->udp_port;
@@ -862,12 +1025,33 @@ static void tcp_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread, const 
                                 // Mark as connected
                                 ctx->is_connected = 1;
 
+                                // Start KCP timer for the new connection
+                                IUINT32 current = uv_now(ctx->loop);
+                                ikcp_update(ctx->kcp, current);
+                                IUINT32 next_update = ikcp_check(ctx->kcp, current);
+
+                                if (next_update == 0)
+                                {
+                                    // Update immediately and check again
+                                    ikcp_update(ctx->kcp, current);
+                                    next_update = ikcp_check(ctx->kcp, current);
+                                }
+                                if (next_update > 0)
+                                {
+                                    uv_timer_start(&ctx->timer_handle, kcp__timer_cb, next_update, 0);
+                                    ctx->timer_active = 1;
+                                    UVKCP_LOG("Started KCP timer for server connection, next update in %u ms", next_update);
+                                }
+
                                 // Open the KCP stream
-                                if (kcp__stream_open(client, sock, UVKCP_FLAG_READABLE | UVKCP_FLAG_WRITABLE) == 0) {
+                                if (kcp__stream_open(client, sock, UVKCP_FLAG_READABLE | UVKCP_FLAG_WRITABLE) == 0)
+                                {
                                     UVKCP_LOG("KCP server created successfully with conv=%u", ntohl(response.conv));
                                     // Call connection callback with the new client
                                     kcp_server->connection_cb(client, 0);
-                                } else {
+                                }
+                                else
+                                {
                                     UVKCP_LOG_ERROR("Failed to open KCP stream");
                                     close(sock);
                                     ikcp_release(ctx->kcp);
@@ -876,38 +1060,50 @@ static void tcp_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread, const 
                                     // Call connection callback with error
                                     kcp_server->connection_cb(NULL, UV_EIO);
                                 }
-                            } else {
+                            }
+                            else
+                            {
                                 UVKCP_LOG_ERROR("Failed to create KCP instance");
                                 close(sock);
                                 ctx->is_connected = 0; // Reset connection state on failure
                                 // Call connection callback with error
                                 kcp_server->connection_cb(NULL, UV_ENOMEM);
                             }
-                        } else {
+                        }
+                        else
+                        {
                             UVKCP_LOG_ERROR("Failed to create UDP socket");
                             ctx->is_connected = 0; // Reset connection state on failure
                             // Call connection callback with error
                             kcp_server->connection_cb(NULL, uv_translate_sys_error(errno));
                         }
-                    } else {
+                    }
+                    else
+                    {
                         UVKCP_LOG_ERROR("Failed to get KCP context");
                         ctx->is_connected = 0; // Reset connection state on failure
                         // Call connection callback with error
                         kcp_server->connection_cb(NULL, UV_ENOMEM);
                     }
-                } else {
+                }
+                else
+                {
                     UVKCP_LOG_ERROR("Failed to initialize KCP handle");
                     free(client);
                     // Call connection callback with error
                     kcp_server->connection_cb(NULL, UV_ENOMEM);
                 }
-            } else {
+            }
+            else
+            {
                 UVKCP_LOG_ERROR("Failed to allocate KCP handle");
                 // Call connection callback with error
                 kcp_server->connection_cb(NULL, UV_ENOMEM);
             }
         }
-    } else {
+    }
+    else
+    {
         UVKCP_LOG_ERROR("Invalid handshake size: %zd", nread);
     }
 
@@ -916,12 +1112,16 @@ cleanup_handshake:
 }
 
 // TCP write callback for handshake
-static void tcp_handshake_write_cb(uv_write_t *req, int status) {
-    if (status != 0) {
+static void tcp_handshake_write_cb(uv_write_t *req, int status)
+{
+    if (status != 0)
+    {
         UVKCP_LOG_ERROR("TCP handshake write error: %d", status);
         // Close TCP connection on write error
         uv_close((uv_handle_t *)req->data, NULL);
-    } else {
+    }
+    else
+    {
         UVKCP_LOG("KCP handshake response sent successfully");
         // Don't close TCP connection here - let client close it after reading the response
         // The client will close the connection in tcp_client_handshake_read_cb
@@ -929,23 +1129,26 @@ static void tcp_handshake_write_cb(uv_write_t *req, int status) {
     free(req);
 }
 
-
 // Client implementation
 
 // TCP connect callback for built-in handshake
-static void tcp_connect_cb(uv_connect_t *req, int status) {
+static void tcp_connect_cb(uv_connect_t *req, int status)
+{
     kcp_context_t *ctx = (kcp_context_t *)req->data;
 
     UVKCP_LOG_FUNC("tcp_connect_cb: TCP connection status=%d", status);
 
-    if (status != 0) {
+    if (status != 0)
+    {
         UVKCP_LOG_ERROR("TCP connect error: %d", status);
-        if (ctx->pending_connect_req && ctx->pending_connect_req->cb) {
+        if (ctx->pending_connect_req && ctx->pending_connect_req->cb)
+        {
             UVKCP_LOG("tcp_connect_cb: Calling connect callback with error status=%d", status);
             ctx->pending_connect_req->cb(ctx->pending_connect_req, status);
         }
         // Clear both context and stream connect requests
-        if (ctx->pending_connect_req) {
+        if (ctx->pending_connect_req)
+        {
             ctx->pending_connect_req->handle->connect_req = NULL;
         }
         ctx->pending_connect_req = NULL;
@@ -957,39 +1160,46 @@ static void tcp_connect_cb(uv_connect_t *req, int status) {
 
     // Send handshake request
     kcp_handshake_t handshake;
-    handshake.conv = 0;  // 0 means request for new conv
+    handshake.conv = 0; // 0 means request for new conv
 
     // Create UDP socket for KCP communication first
     int domain = (ctx->server_addr.ss_family == AF_INET) ? AF_INET : AF_INET6;
     int sock = socket(domain, SOCK_DGRAM, 0);
-    if (sock >= 0) {
+    if (sock >= 0)
+    {
         // Bind the client socket to any available port
         struct sockaddr_storage bind_addr;
         socklen_t bind_addr_len = sizeof(bind_addr);
         memset(&bind_addr, 0, sizeof(bind_addr));
 
-        if (domain == AF_INET) {
-            struct sockaddr_in *addr_in = (struct sockaddr_in*)&bind_addr;
+        if (domain == AF_INET)
+        {
+            struct sockaddr_in *addr_in = (struct sockaddr_in *)&bind_addr;
             addr_in->sin_family = AF_INET;
             addr_in->sin_addr.s_addr = INADDR_ANY;
             addr_in->sin_port = 0; // Let OS assign port
             bind_addr_len = sizeof(struct sockaddr_in);
-        } else {
-            struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6*)&bind_addr;
+        }
+        else
+        {
+            struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)&bind_addr;
             addr_in6->sin6_family = AF_INET6;
             addr_in6->sin6_addr = in6addr_any;
             addr_in6->sin6_port = 0; // Let OS assign port
             bind_addr_len = sizeof(struct sockaddr_in6);
         }
 
-        if (bind(sock, (struct sockaddr*)&bind_addr, bind_addr_len) < 0) {
+        if (bind(sock, (struct sockaddr *)&bind_addr, bind_addr_len) < 0)
+        {
             UVKCP_LOG_ERROR("Failed to bind client UDP socket: %s", strerror(errno));
             close(sock);
-            if (ctx->pending_connect_req && ctx->pending_connect_req->cb) {
+            if (ctx->pending_connect_req && ctx->pending_connect_req->cb)
+            {
                 ctx->pending_connect_req->cb(ctx->pending_connect_req, uv_translate_sys_error(errno));
             }
             // Clear both context and stream connect requests
-            if (ctx->pending_connect_req) {
+            if (ctx->pending_connect_req)
+            {
                 ctx->pending_connect_req->handle->connect_req = NULL;
             }
             ctx->pending_connect_req = NULL;
@@ -998,14 +1208,17 @@ static void tcp_connect_cb(uv_connect_t *req, int status) {
         }
 
         // Set socket to non-blocking mode for libuv integration
-        if (set_socket_nonblocking(sock) != 0) {
+        if (set_socket_nonblocking(sock) != 0)
+        {
             UVKCP_LOG_ERROR("Failed to set client UDP socket non-blocking");
             close(sock);
-            if (ctx->pending_connect_req && ctx->pending_connect_req->cb) {
+            if (ctx->pending_connect_req && ctx->pending_connect_req->cb)
+            {
                 ctx->pending_connect_req->cb(ctx->pending_connect_req, uv_translate_sys_error(errno));
             }
             // Clear both context and stream connect requests
-            if (ctx->pending_connect_req) {
+            if (ctx->pending_connect_req)
+            {
                 ctx->pending_connect_req->handle->connect_req = NULL;
             }
             ctx->pending_connect_req = NULL;
@@ -1017,28 +1230,38 @@ static void tcp_connect_cb(uv_connect_t *req, int status) {
         // Get client's UDP socket address for proper peer communication
         struct sockaddr_storage client_addr;
         socklen_t client_addr_len = sizeof(client_addr);
-        if (getsockname(ctx->udp_fd, (struct sockaddr*)&client_addr, &client_addr_len) == 0) {
-            if (client_addr.ss_family == AF_INET) {
-                struct sockaddr_in *addr_in = (struct sockaddr_in*)&client_addr;
+        if (getsockname(ctx->udp_fd, (struct sockaddr *)&client_addr, &client_addr_len) == 0)
+        {
+            if (client_addr.ss_family == AF_INET)
+            {
+                struct sockaddr_in *addr_in = (struct sockaddr_in *)&client_addr;
                 handshake.udp_port = addr_in->sin_port;
                 handshake.addr_family = AF_INET;
                 memcpy(handshake.peer_addr, &addr_in->sin_addr, 4);
-            } else if (client_addr.ss_family == AF_INET6) {
-                struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6*)&client_addr;
+            }
+            else if (client_addr.ss_family == AF_INET6)
+            {
+                struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)&client_addr;
                 handshake.udp_port = addr_in6->sin6_port;
                 handshake.addr_family = AF_INET6;
                 memcpy(handshake.peer_addr, &addr_in6->sin6_addr, 16);
-            } else {
+            }
+            else
+            {
                 handshake.udp_port = 0;
                 handshake.addr_family = AF_INET;
                 memset(handshake.peer_addr, 0, sizeof(handshake.peer_addr));
             }
-        } else {
+        }
+        else
+        {
             handshake.udp_port = 0;
             handshake.addr_family = AF_INET;
             memset(handshake.peer_addr, 0, sizeof(handshake.peer_addr));
         }
-    } else {
+    }
+    else
+    {
         handshake.udp_port = 0;
         handshake.addr_family = AF_INET;
         memset(handshake.peer_addr, 0, sizeof(handshake.peer_addr));
@@ -1060,29 +1283,63 @@ static void tcp_connect_cb(uv_connect_t *req, int status) {
     free(req);
 }
 
-
 // TCP write callback for client handshake
-static void tcp_client_handshake_write_cb(uv_write_t *req, int status) {
-    if (status != 0) {
+static void tcp_client_handshake_write_cb(uv_write_t *req, int status)
+{
+    if (status != 0)
+    {
         UVKCP_LOG_ERROR("Client handshake write error: %d", status);
         uv_close((uv_handle_t *)req->data, NULL);
-    } else {
+    }
+    else
+    {
         UVKCP_LOG("Client handshake request sent");
     }
     free(req);
 }
 
 // TCP read callback for client handshake
-static void tcp_client_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread, const uv_buf_t *buf) {
+static void tcp_client_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread, const uv_buf_t *buf)
+{
     kcp_context_t *ctx = (kcp_context_t *)tcp_client->data;
 
-    if (nread < 0) {
-        UVKCP_LOG_ERROR("Client handshake read error: %zd", nread);
-        if (ctx->pending_connect_req && ctx->pending_connect_req->cb) {
+    if (nread < 0)
+    {
+        // Convert libuv error codes to meaningful descriptions
+        const char *error_desc = "Unknown error";
+        if (nread == UV_EOF)
+        {
+            error_desc = "Connection closed by server";
+        }
+        else if (nread == UV_ECONNRESET)
+        {
+            error_desc = "Connection reset by server";
+        }
+        else if (nread == UV_ETIMEDOUT)
+        {
+            error_desc = "Connection timeout";
+        }
+        else if (nread == UV_ECONNREFUSED)
+        {
+            error_desc = "Connection refused";
+        }
+
+        UVKCP_LOG_ERROR("Client handshake read error: %zd (%s)", nread, error_desc);
+
+        // Clean up any partially created UDP socket
+        if (ctx->udp_fd >= 0)
+        {
+            close(ctx->udp_fd);
+            ctx->udp_fd = -1;
+        }
+
+        if (ctx->pending_connect_req && ctx->pending_connect_req->cb)
+        {
             ctx->pending_connect_req->cb(ctx->pending_connect_req, nread);
         }
         // Clear both context and stream connect requests
-        if (ctx->pending_connect_req) {
+        if (ctx->pending_connect_req)
+        {
             ctx->pending_connect_req->handle->connect_req = NULL;
         }
         ctx->pending_connect_req = NULL;
@@ -1091,7 +1348,8 @@ static void tcp_client_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread,
         return;
     }
 
-    if (nread == sizeof(kcp_handshake_t)) {
+    if (nread == sizeof(kcp_handshake_t))
+    {
         kcp_handshake_t *handshake = (kcp_handshake_t *)buf->base;
         uint32_t conv = ntohl(handshake->conv);
 
@@ -1102,29 +1360,39 @@ static void tcp_client_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread,
 
         UVKCP_LOG("tcp_client_handshake_read_cb: Creating KCP instance with conv=%u", conv);
 
-        if (ctx) {
+        if (ctx)
+        {
             // Use the UDP socket already created in TCP connect callback
-            if (ctx->udp_fd >= 0) {
+            if (ctx->udp_fd >= 0)
+            {
                 UVKCP_LOG("tcp_client_handshake_read_cb: Using UDP socket fd=%d", ctx->udp_fd);
                 // Create KCP instance with exchanged conversation ID
                 ctx->kcp = ikcp_create(conv, ctx);
-                if (ctx->kcp) {
+                if (ctx->kcp)
+                {
                     UVKCP_LOG("tcp_client_handshake_read_cb: KCP instance created successfully");
                     // Configure KCP
                     ikcp_setoutput(ctx->kcp, kcp_output);
+
+                    ctx->kcp->writelog = kcp_writelog;
+                    ctx->kcp->logmask = 0xffffffff; /// IKCP_LOG_OUTPUT | IKCP_LOG_INPUT | IKCP_LOG_SEND | IKCP_LOG_RECV | IKCP_LOG_IN_DATA | IKCP_LOG_IN_ACK;
+
                     ikcp_nodelay(ctx->kcp, 1, 10, 2, 1);
                     ikcp_wndsize(ctx->kcp, 128, 128);
                     ikcp_setmtu(ctx->kcp, 1400);
 
                     // Set peer address from handshake
-                    if (handshake->addr_family == AF_INET) {
+                    if (handshake->addr_family == AF_INET)
+                    {
                         struct sockaddr_in *peer = (struct sockaddr_in *)&ctx->peer_addr;
                         peer->sin_family = AF_INET;
                         peer->sin_port = handshake->udp_port;
                         memcpy(&peer->sin_addr, handshake->peer_addr, 4);
                         ctx->peer_addr_len = sizeof(struct sockaddr_in);
                         UVKCP_LOG("tcp_client_handshake_read_cb: Set IPv4 peer address");
-                    } else {
+                    }
+                    else
+                    {
                         struct sockaddr_in6 *peer = (struct sockaddr_in6 *)&ctx->peer_addr;
                         peer->sin6_family = AF_INET6;
                         peer->sin6_port = handshake->udp_port;
@@ -1137,10 +1405,31 @@ static void tcp_client_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread,
                     ctx->is_connected = 1;
                     UVKCP_LOG("tcp_client_handshake_read_cb: Marked connection as established (is_connected=1)");
 
+                    // Start KCP timer for the client connection
+                    IUINT32 current = uv_now(ctx->loop);
+                    ikcp_update(ctx->kcp, current);
+                    IUINT32 next_update = ikcp_check(ctx->kcp, current);
+
+                    if (next_update == 0)
+                    {
+                        // Update immediately and check again
+                        ikcp_update(ctx->kcp, current);
+                        next_update = ikcp_check(ctx->kcp, current);
+                    }
+                    if (next_update > 0)
+                    {
+                        uv_timer_start(&ctx->timer_handle, kcp__timer_cb, 10 /*next_update*/, 1);
+                        ctx->timer_active = 1;
+                        UVKCP_LOG("Started KCP timer for client connection, next update in %u ms", next_update);
+                    }
+
                     // Open the KCP stream
-                    if (kcp__stream_open(client, ctx->udp_fd, UVKCP_FLAG_READABLE | UVKCP_FLAG_WRITABLE) == 0) {
+                    if (kcp__stream_open(client, ctx->udp_fd, UVKCP_FLAG_READABLE | UVKCP_FLAG_WRITABLE) == 0)
+                    {
                         UVKCP_LOG("KCP client created successfully with conv=%u", conv);
-                    } else {
+                    }
+                    else
+                    {
                         UVKCP_LOG_ERROR("Failed to open KCP stream");
                         close(ctx->udp_fd);
                         ikcp_release(ctx->kcp);
@@ -1148,13 +1437,17 @@ static void tcp_client_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread,
                         ctx->is_connected = 0; // Reset connection state on failure
                         // Connection will fail, but callback will be called below
                     }
-                } else {
+                }
+                else
+                {
                     UVKCP_LOG_ERROR("Failed to create KCP instance");
                     close(ctx->udp_fd);
                     ctx->is_connected = 0; // Reset connection state on failure
                     // Connection will fail, but callback will be called below
                 }
-            } else {
+            }
+            else
+            {
                 UVKCP_LOG_ERROR("Failed to create UDP socket");
                 // Connection will fail, but callback will be called below
             }
@@ -1164,28 +1457,45 @@ static void tcp_client_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread,
         uv_close((uv_handle_t *)tcp_client, NULL);
 
         // Call connection callback
-        if (ctx->pending_connect_req && ctx->pending_connect_req->cb) {
+        if (ctx->pending_connect_req && ctx->pending_connect_req->cb)
+        {
             // Check if connection was successfully established
-            if (ctx->is_connected && ctx->kcp != NULL) {
+            if (ctx->is_connected && ctx->kcp != NULL)
+            {
                 ctx->pending_connect_req->cb(ctx->pending_connect_req, 0);
-            } else {
+            }
+            else
+            {
                 // Connection failed during setup
                 ctx->pending_connect_req->cb(ctx->pending_connect_req, UV_EIO);
             }
         }
 
         // Clear both context and stream connect requests
-        if (ctx->pending_connect_req) {
+        if (ctx->pending_connect_req)
+        {
             ctx->pending_connect_req->handle->connect_req = NULL;
         }
         ctx->pending_connect_req = NULL;
-    } else {
-        UVKCP_LOG_ERROR("Invalid handshake response size: %zd", nread);
-        if (ctx->pending_connect_req && ctx->pending_connect_req->cb) {
+    }
+    else
+    {
+        UVKCP_LOG_ERROR("Invalid handshake response size: %zd (expected %zu)", nread, sizeof(kcp_handshake_t));
+
+        // Clean up any partially created UDP socket
+        if (ctx->udp_fd >= 0)
+        {
+            close(ctx->udp_fd);
+            ctx->udp_fd = -1;
+        }
+
+        if (ctx->pending_connect_req && ctx->pending_connect_req->cb)
+        {
             ctx->pending_connect_req->cb(ctx->pending_connect_req, UV_EINVAL);
         }
         // Clear both context and stream connect requests
-        if (ctx->pending_connect_req) {
+        if (ctx->pending_connect_req)
+        {
             ctx->pending_connect_req->handle->connect_req = NULL;
         }
         uv_close((uv_handle_t *)tcp_client, NULL);
@@ -1194,4 +1504,3 @@ static void tcp_client_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread,
 
     free(buf->base);
 }
-

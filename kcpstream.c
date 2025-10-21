@@ -558,30 +558,8 @@ int uvkcp_shutdown(uvkcp_shutdown_t* req, uvkcp_t* stream, uvkcp_shutdown_cb cb)
   return 0;
 }
 
-static void kcp__timer_cb(uv_timer_t* timer) {
-    kcp_context_t* ctx = (kcp_context_t*)timer->data;
-    if (!ctx || !ctx->kcp) {
-        return;
-    }
-
-    IUINT32 current = uv_now(ctx->loop);
-
-    // Update KCP state - this will flush any pending output
-    ikcp_update(ctx->kcp, current);
-
-    // Check when next update is needed
-    IUINT32 next_update = ikcp_check(ctx->kcp, current);
-
-    // Reschedule timer for next update time
-    if (next_update > 0) {
-        uv_timer_start(&ctx->timer_handle, kcp__timer_cb, 10/*next_update*/, 0);
-        ctx->timer_active = 1;
-        UVKCP_LOG("KCP timer rescheduled, next update in %u ms", next_update);
-    } else {
-        ctx->timer_active = 0;
-        UVKCP_LOG("KCP timer stopped, no more updates needed");
-    }
-}
+// Timer callback is implemented in uvkcp.c - this is just a forward declaration
+extern void kcp__timer_cb(uv_timer_t* timer);
 
 static void kcp__server_io(uvkcp_t* stream) {
     kcp_context_t* ctx = kcp__get_context(stream);
@@ -637,6 +615,7 @@ void kcp__stream_io(uv_poll_t * handle, int status, int events) {
       // Start timer if not already active
       if (!ctx->timer_active) {
         IUINT32 current = uv_now(ctx->loop);
+        ikcp_update(ctx->kcp, current);
         IUINT32 next_update = ikcp_check(ctx->kcp, current);
         if (next_update == 0) {
           // Update immediately and check again
@@ -644,7 +623,7 @@ void kcp__stream_io(uv_poll_t * handle, int status, int events) {
           next_update = ikcp_check(ctx->kcp, current);
         }
         if (next_update > 0) {
-          uv_timer_start(&ctx->timer_handle, kcp__timer_cb, 10/*next_update*/, 0);
+          uv_timer_start(&ctx->timer_handle, kcp__timer_cb, next_update, 0);
           ctx->timer_active = 1;
           UVKCP_LOG("Started KCP timer, next update in %u ms", next_update);
         }
