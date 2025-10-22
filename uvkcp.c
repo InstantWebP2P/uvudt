@@ -59,8 +59,6 @@ static void kcp_writelog(const char *log, ikcpcb *kcp, void *user)
 // KCP output function - sends data over UDP
 static int kcp_output(const char *buf, int len, ikcpcb *kcp, void *user)
 {
-    ///UVKCP_LOG_FUNC("kcp_output enter ...");
-
     kcp_context_t *ctx = (kcp_context_t *)user;
 
     if (ctx->udp_fd == -1)
@@ -109,8 +107,6 @@ static int kcp_output(const char *buf, int len, ikcpcb *kcp, void *user)
     // Track statistics
     ctx->pktSentTotal++;
     ctx->bytesSentTotal += sent;
-
-    ///UVKCP_LOG_FUNC("kcp_output exit ...");
 
     // KCP expects 0 on success, not the number of bytes sent
     return 0;
@@ -251,10 +247,10 @@ int uvkcp_bind(uvkcp_t *handle, const struct sockaddr *addr, int reuseaddr, int 
     // Log the TCP port we're binding to
     if (addr->sa_family == AF_INET) {
         struct sockaddr_in *addr_in = (struct sockaddr_in *)addr;
-        UVKCP_LOG("KCP handle bound to TCP handshake socket on port %d, ready for listening", ntohs(addr_in->sin_port));
+        UVKCP_LOG("KCP handle bound to TCP4 handshake socket on port %d, ready for listening", ntohs(addr_in->sin_port));
     } else if (addr->sa_family == AF_INET6) {
         struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)addr;
-        UVKCP_LOG("KCP handle bound to TCP handshake socket on port %d, ready for listening", ntohs(addr_in6->sin6_port));
+        UVKCP_LOG("KCP handle bound to TCP6 handshake socket on port %d, ready for listening", ntohs(addr_in6->sin6_port));
     }
 
     // UDP socket will be created later for each client connection
@@ -915,7 +911,15 @@ static void tcp_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread, const 
 
         // Process handshake request
         uint32_t conv = ntohl(handshake->conv);
-        UVKCP_LOG("Received KCP handshake request: conv=%u", conv);
+        UVKCP_LOG("Received KCP handshake request: conv=%u, addr_family=%d, udp_port=%d",
+                  conv, handshake->addr_family, ntohs(handshake->udp_port));
+
+        // Debug log the peer address bytes
+        UVKCP_LOG("Handshake peer_addr bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
+                  handshake->peer_addr[0], handshake->peer_addr[1], handshake->peer_addr[2], handshake->peer_addr[3],
+                  handshake->peer_addr[4], handshake->peer_addr[5], handshake->peer_addr[6], handshake->peer_addr[7],
+                  handshake->peer_addr[8], handshake->peer_addr[9], handshake->peer_addr[10], handshake->peer_addr[11],
+                  handshake->peer_addr[12], handshake->peer_addr[13], handshake->peer_addr[14], handshake->peer_addr[15]);
 
         // Create response handshake
         kcp_handshake_t response;
@@ -925,7 +929,8 @@ static void tcp_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread, const 
         // Create UDP socket for this client connection and get its actual UDP port
         int domain = (handshake->addr_family == AF_INET) ? AF_INET : AF_INET6;
         int server_udp_sock = socket(domain, SOCK_DGRAM, 0);
-        UVKCP_LOG("Creating UDP socket for client connection: domain=%d, sock=%d", domain, server_udp_sock);
+        UVKCP_LOG("Creating UDP socket for client connection: domain=%d (%s), sock=%d",
+                  domain, (domain == AF_INET) ? "AF_INET" : "AF_INET6", server_udp_sock);
         if (server_udp_sock >= 0)
         {
             // Bind the server UDP socket to any available port
@@ -1101,6 +1106,10 @@ static void tcp_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread, const 
                                     peer->sin_port = handshake->udp_port;
                                     memcpy(&peer->sin_addr, handshake->peer_addr, 4);
                                     ctx->peer_addr_len = sizeof(struct sockaddr_in);
+
+                                    char ip_str[INET_ADDRSTRLEN];
+                                    inet_ntop(AF_INET, &peer->sin_addr, ip_str, sizeof(ip_str));
+                                    UVKCP_LOG("Server: Set IPv4 peer address: %s:%d", ip_str, ntohs(peer->sin_port));
                                 }
                                 else
                                 {
@@ -1109,6 +1118,10 @@ static void tcp_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread, const 
                                     peer->sin6_port = handshake->udp_port;
                                     memcpy(&peer->sin6_addr, handshake->peer_addr, 16);
                                     ctx->peer_addr_len = sizeof(struct sockaddr_in6);
+
+                                    char ip_str[INET6_ADDRSTRLEN];
+                                    inet_ntop(AF_INET6, &peer->sin6_addr, ip_str, sizeof(ip_str));
+                                    UVKCP_LOG("Server: Set IPv6 peer address: [%s]:%d", ip_str, ntohs(peer->sin6_port));
                                 }
 
                                 // Mark as connected
@@ -1243,7 +1256,19 @@ static void tcp_connect_cb(uv_connect_t *req, int status)
     handshake.conv = 0; // 0 means request for new conv
 
     // Create UDP socket for KCP communication first
-    int domain = (ctx->server_addr.ss_family == AF_INET) ? AF_INET : AF_INET6;
+    // Use the same address family as the TCP handshake connection
+    // Get the actual socket family from the TCP connection
+    struct sockaddr_storage tcp_local_addr;
+    socklen_t tcp_addr_len = sizeof(tcp_local_addr);
+    int domain = AF_INET; // Default to IPv4
+
+    if (getsockname(ctx->tcp_client.io_watcher.fd, (struct sockaddr *)&tcp_local_addr, &tcp_addr_len) == 0) {
+        domain = (tcp_local_addr.ss_family == AF_INET) ? AF_INET : AF_INET6;
+        UVKCP_LOG("TCP handshake socket family: %s", (domain == AF_INET) ? "AF_INET" : "AF_INET6");
+    } else {
+        UVKCP_LOG_ERROR("Failed to get TCP socket family, defaulting to AF_INET");
+    }
+
     int sock = socket(domain, SOCK_DGRAM, 0);
     if (sock >= 0)
     {
@@ -1325,6 +1350,8 @@ static void tcp_connect_cb(uv_connect_t *req, int status)
         }
 
         // Get client's UDP socket address for proper peer communication
+        // We need to send the address that the server will see when receiving UDP packets
+        // For IPv6, we should use the actual address that will be used for communication
         if (getsockname(ctx->udp_fd, (struct sockaddr *)&client_addr, &client_addr_len) == 0)
         {
             if (client_addr.ss_family == AF_INET)
@@ -1333,6 +1360,13 @@ static void tcp_connect_cb(uv_connect_t *req, int status)
                 handshake.udp_port = addr_in->sin_port;
                 handshake.addr_family = AF_INET;
                 memcpy(handshake.peer_addr, &addr_in->sin_addr, 4);
+
+                // For IPv4, if bound to 0.0.0.0, use localhost for testing
+                if (addr_in->sin_addr.s_addr == INADDR_ANY) {
+                    struct sockaddr_in localhost;
+                    uv_ip4_addr("127.0.0.1", 0, &localhost);
+                    memcpy(handshake.peer_addr, &localhost.sin_addr, 4);
+                }
             }
             else if (client_addr.ss_family == AF_INET6)
             {
@@ -1340,6 +1374,13 @@ static void tcp_connect_cb(uv_connect_t *req, int status)
                 handshake.udp_port = addr_in6->sin6_port;
                 handshake.addr_family = AF_INET6;
                 memcpy(handshake.peer_addr, &addr_in6->sin6_addr, 16);
+
+                // For IPv6, if bound to ::, use ::1 for testing
+                if (memcmp(&addr_in6->sin6_addr, &in6addr_any, sizeof(in6addr_any)) == 0) {
+                    struct sockaddr_in6 localhost6;
+                    uv_ip6_addr("::1", 0, &localhost6);
+                    memcpy(handshake.peer_addr, &localhost6.sin6_addr, 16);
+                }
             }
             else
             {
@@ -1486,7 +1527,11 @@ static void tcp_client_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread,
                         peer->sin_port = handshake->udp_port;
                         memcpy(&peer->sin_addr, handshake->peer_addr, 4);
                         ctx->peer_addr_len = sizeof(struct sockaddr_in);
-                        UVKCP_LOG("tcp_client_handshake_read_cb: Set IPv4 peer address");
+
+                        char ip_str[INET_ADDRSTRLEN];
+                        inet_ntop(AF_INET, &peer->sin_addr, ip_str, sizeof(ip_str));
+                        UVKCP_LOG("tcp_client_handshake_read_cb: Set IPv4 peer address: %s:%d",
+                                  ip_str, ntohs(peer->sin_port));
                     }
                     else
                     {
@@ -1495,7 +1540,44 @@ static void tcp_client_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread,
                         peer->sin6_port = handshake->udp_port;
                         memcpy(&peer->sin6_addr, handshake->peer_addr, 16);
                         ctx->peer_addr_len = sizeof(struct sockaddr_in6);
-                        UVKCP_LOG("tcp_client_handshake_read_cb: Set IPv6 peer address");
+
+                        char ip_str[INET6_ADDRSTRLEN];
+                        inet_ntop(AF_INET6, &peer->sin6_addr, ip_str, sizeof(ip_str));
+                        UVKCP_LOG("tcp_client_handshake_read_cb: Set IPv6 peer address: [%s]:%d",
+                                  ip_str, ntohs(peer->sin6_port));
+
+                        // Debug: Log the raw bytes of the IPv6 address
+                        UVKCP_LOG("tcp_client_handshake_read_cb: IPv6 address bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
+                                  handshake->peer_addr[0], handshake->peer_addr[1], handshake->peer_addr[2], handshake->peer_addr[3],
+                                  handshake->peer_addr[4], handshake->peer_addr[5], handshake->peer_addr[6], handshake->peer_addr[7],
+                                  handshake->peer_addr[8], handshake->peer_addr[9], handshake->peer_addr[10], handshake->peer_addr[11],
+                                  handshake->peer_addr[12], handshake->peer_addr[13], handshake->peer_addr[14], handshake->peer_addr[15]);
+
+                        // Additional debug: Check if the peer address family is correctly set
+                        UVKCP_LOG("tcp_client_handshake_read_cb: ctx->peer_addr.ss_family=%d, peer_addr_len=%d",
+                                  ctx->peer_addr.ss_family, ctx->peer_addr_len);
+                    }
+
+                    // Debug: Log the actual peer address that will be used in kcp_output
+                    if (ctx->peer_addr.ss_family == AF_INET)
+                    {
+                        struct sockaddr_in *peer = (struct sockaddr_in *)&ctx->peer_addr;
+                        char ip_str[INET_ADDRSTRLEN];
+                        inet_ntop(AF_INET, &peer->sin_addr, ip_str, sizeof(ip_str));
+                        UVKCP_LOG("tcp_client_handshake_read_cb: Final peer address for kcp_output: %s:%d (family=%d)",
+                                  ip_str, ntohs(peer->sin_port), ctx->peer_addr.ss_family);
+                    }
+                    else if (ctx->peer_addr.ss_family == AF_INET6)
+                    {
+                        struct sockaddr_in6 *peer = (struct sockaddr_in6 *)&ctx->peer_addr;
+                        char ip_str[INET6_ADDRSTRLEN];
+                        inet_ntop(AF_INET6, &peer->sin6_addr, ip_str, sizeof(ip_str));
+                        UVKCP_LOG("tcp_client_handshake_read_cb: Final peer address for kcp_output: [%s]:%d (family=%d)",
+                                  ip_str, ntohs(peer->sin6_port), ctx->peer_addr.ss_family);
+                    }
+                    else
+                    {
+                        UVKCP_LOG("tcp_client_handshake_read_cb: Unknown peer address family: %d", ctx->peer_addr.ss_family);
                     }
 
                     // Mark as connected

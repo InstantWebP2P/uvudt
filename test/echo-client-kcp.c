@@ -7,8 +7,8 @@
 
 #define TEST_PORT (51686)
 
-#define SERVER_MAX_NUM 10
-#define CLIENT_MAX_NUM 10
+#define SERVER_MAX_NUM 1
+#define CLIENT_MAX_NUM 1
 
 /* Run the benchmark for this many ms */
 #define TIME 6000
