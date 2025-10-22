@@ -26,33 +26,30 @@ static void start_client_timer_cb(uv_timer_t* timer) {
 
 // Server callbacks
 static void server_after_write(uvkcp_write_t* req, int status) {
-    printf("[SERVER] Write completed: status=%d\n", status);
+    if (status != 0) {
+        fprintf(stderr, "[SERVER] Write error: status=%d\n", status);
+    }
     free(req);
 }
 
 static void server_after_read(uvkcp_t* handle, ssize_t nread, const uv_buf_t* buf) {
-    printf("[SERVER] Read callback: nread=%zd\n", nread);
-
     if (nread < 0) {
-        printf("[SERVER] Read error: %zd\n", nread);
+        fprintf(stderr, "[SERVER] Read error: %zd\n", nread);
         free(buf->base);
         return;
     }
 
     if (nread == 0) {
-        printf("[SERVER] Read 0 bytes\n");
         free(buf->base);
         return;
     }
-
-    printf("[SERVER] Received: %.*s\n", (int)nread, buf->base);
 
     // Echo back the received data
     uvkcp_write_t *write_req = malloc(sizeof(uvkcp_write_t));
     uv_buf_t write_buf = uv_buf_init(buf->base, nread);
 
     if (uvkcp_write(write_req, handle, &write_buf, 1, server_after_write)) {
-        printf("[SERVER] uvkcp_write failed\n");
+        fprintf(stderr, "[SERVER] uvkcp_write failed\n");
         free(write_req);
     }
 }
@@ -63,7 +60,6 @@ static void server_echo_alloc(uv_handle_t* handle, size_t suggested_size, uv_buf
 }
 
 static void server_on_connection(uvkcp_t* server, int status) {
-    printf("[SERVER] New connection: status=%d\n", status);
     server_connections++;
 
     if (status != 0) {
@@ -74,41 +70,36 @@ static void server_on_connection(uvkcp_t* server, int status) {
     // The client handle is already created and configured by the handshake
     // Just start reading on it
     if (uvkcp_read_start(server, server_echo_alloc, server_after_read)) {
-        printf("[SERVER] uvkcp_read_start failed\n");
-    } else {
-        printf("[SERVER] Started reading on client connection\n");
+        fprintf(stderr, "[SERVER] uvkcp_read_start failed\n");
     }
 }
 
 // Client callbacks
 static void client_after_write(uvkcp_write_t* req, int status) {
-    printf("[CLIENT] Write completed: status=%d\n", status);
+    if (status != 0) {
+        fprintf(stderr, "[CLIENT] Write error: status=%d\n", status);
+    }
     free(req);
 }
 
 static void client_after_read(uvkcp_t* handle, ssize_t nread, const uv_buf_t* buf) {
-    printf("[CLIENT] Read callback: nread=%zd\n", nread);
-
     if (nread < 0) {
-        printf("[CLIENT] Read error: %zd\n", nread);
+        fprintf(stderr, "[CLIENT] Read error: %zd\n", nread);
         free(buf->base);
         return;
     }
 
     if (nread == 0) {
-        printf("[CLIENT] Read 0 bytes\n");
         free(buf->base);
         return;
     }
-
-    printf("[CLIENT] Received echo: %.*s\n", (int)nread, buf->base);
 
     // Verify the echo matches our original message
     if (nread == (ssize_t)strlen(TEST_MESSAGE) &&
         memcmp(buf->base, TEST_MESSAGE, nread) == 0) {
         printf("[CLIENT] SUCCESS: Echo matches original message!\n");
     } else {
-        printf("[CLIENT] ERROR: Echo doesn't match original message\n");
+        fprintf(stderr, "[CLIENT] ERROR: Echo doesn't match original message\n");
     }
 
     free(buf->base);
@@ -129,32 +120,24 @@ static void client_echo_alloc(uv_handle_t* handle, size_t suggested_size, uv_buf
 }
 
 static void client_on_connect(uvkcp_connect_t* req, int status) {
-    printf("[CLIENT] Connect callback: status=%d\n", status);
-
     if (status != 0) {
         fprintf(stderr, "[CLIENT] Connect error: %s\n", uv_err_name(status));
         return;
     }
 
-    printf("[CLIENT] Connection established successfully\n");
-
     // Start reading
     if (uvkcp_read_start(req->handle, client_echo_alloc, client_after_read)) {
-        printf("[CLIENT] uvkcp_read_start failed\n");
+        fprintf(stderr, "[CLIENT] uvkcp_read_start failed\n");
         return;
     }
-
-    printf("[CLIENT] Started reading\n");
 
     // Send test message
     uvkcp_write_t *write_req = malloc(sizeof(uvkcp_write_t));
     uv_buf_t write_buf = uv_buf_init(TEST_MESSAGE, strlen(TEST_MESSAGE));
 
     if (uvkcp_write(write_req, req->handle, &write_buf, 1, client_after_write)) {
-        printf("[CLIENT] uvkcp_write failed\n");
+        fprintf(stderr, "[CLIENT] uvkcp_write failed\n");
         free(write_req);
-    } else {
-        printf("[CLIENT] Sent test message: %s\n", TEST_MESSAGE);
     }
 }
 
@@ -222,7 +205,6 @@ static int start_kcp_client(void) {
 
     // TCP handshake is mandatory and enabled by default in KCP implementation
 
-    printf("[CLIENT] Connecting to KCP server...\n");
     r = uvkcp_connect(connect_req, client, (const struct sockaddr*)&tcp_addr, client_on_connect);
     if (r != 0) {
         fprintf(stderr, "[CLIENT] Failed to connect to KCP server: %s\n", uv_err_name(r));
@@ -232,14 +214,11 @@ static int start_kcp_client(void) {
     }
 
     client_connections++;
-    printf("[CLIENT] KCP client connection initiated\n");
     return 0;
 }
 
 int main(int argc, char *argv[]) {
     loop = uv_default_loop();
-
-    printf("=== KCP Server/Client Test ===\n");
 
     // Start server
     if (start_kcp_server() != 0) {
@@ -251,7 +230,6 @@ int main(int argc, char *argv[]) {
     uv_timer_init(loop, &timer);
     uv_timer_start(&timer, start_client_timer_cb, 100, 0);
 
-    printf("Running test...\n");
     uv_run(loop, UV_RUN_DEFAULT);
 
     printf("\n=== Test Summary ===\n");

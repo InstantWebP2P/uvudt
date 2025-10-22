@@ -4,8 +4,65 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <string.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 
 #define TEST_PORT (51686)
+
+// Helper function to display KCP connection information
+static void display_kcp_connection_info(uvkcp_t* handle, const char* role) {
+    // Get KCP conversation ID
+    kcp_context_t *ctx = (kcp_context_t *)handle->kcp_ctx;
+    if (!ctx || !ctx->kcp) {
+        printf("[%s] KCP context not available\n", role);
+        return;
+    }
+
+    uint32_t conv_id = ctx->kcp->conv;
+    printf("[%s] KCP Conversation ID: %u\n", role, conv_id);
+
+    // Get peer address (remote endpoint)
+    struct sockaddr_storage peer_addr;
+    int addr_len = sizeof(peer_addr);
+    if (uvkcp_getpeername(handle, (struct sockaddr*)&peer_addr, &addr_len) == 0) {
+        char ip_str[INET6_ADDRSTRLEN];
+        uint16_t port;
+
+        if (peer_addr.ss_family == AF_INET) {
+            struct sockaddr_in *addr_in = (struct sockaddr_in*)&peer_addr;
+            inet_ntop(AF_INET, &addr_in->sin_addr, ip_str, sizeof(ip_str));
+            port = ntohs(addr_in->sin_port);
+        } else {
+            struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6*)&peer_addr;
+            inet_ntop(AF_INET6, &addr_in6->sin6_addr, ip_str, sizeof(ip_str));
+            port = ntohs(addr_in6->sin6_port);
+        }
+        printf("[%s] Connected to: %s:%d\n", role, ip_str, port);
+    } else {
+        printf("[%s] Peer address not available\n", role);
+    }
+
+    // Get local address
+    struct sockaddr_storage local_addr;
+    addr_len = sizeof(local_addr);
+    if (uvkcp_getsockname(handle, (struct sockaddr*)&local_addr, &addr_len) == 0) {
+        char ip_str[INET6_ADDRSTRLEN];
+        uint16_t port;
+
+        if (local_addr.ss_family == AF_INET) {
+            struct sockaddr_in *addr_in = (struct sockaddr_in*)&local_addr;
+            inet_ntop(AF_INET, &addr_in->sin_addr, ip_str, sizeof(ip_str));
+            port = ntohs(addr_in->sin_port);
+        } else {
+            struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6*)&local_addr;
+            inet_ntop(AF_INET6, &addr_in6->sin6_addr, ip_str, sizeof(ip_str));
+            port = ntohs(addr_in6->sin6_port);
+        }
+        printf("[%s] Listening on: %s:%d\n", role, ip_str, port);
+    } else {
+        printf("[%s] Local address not available\n", role);
+    }
+}
 
 typedef struct {
   uvkcp_write_t req;
@@ -55,11 +112,9 @@ static void after_read(uvkcp_t* handle,
   write_req_t *wr;
   uvkcp_shutdown_t* sreq;
 
-  printf("[SERVER] Read callback: nread=%zd, buf_base=%p, buf_len=%zu\n", nread, buf->base, buf->len);
-
   if (nread < 0) {
     /* Error or EOF */
-    printf("[SERVER] Read error: %zd (%s)\n", nread, uv_err_name(nread));
+    fprintf(stderr, "[SERVER] Read error: %zd (%s)\n", nread, uv_err_name(nread));
     assert(nread == UV_EOF);
 
     free(buf->base);
@@ -70,30 +125,17 @@ static void after_read(uvkcp_t* handle,
 
   if (nread == 0) {
     /* Everything OK, but nothing read. */
-    printf("[SERVER] Read 0 bytes\n");
     free(buf->base);
     return;
   }
-
-  // Log the actual data received
-  ssize_t j;
-  printf("[SERVER] Received %zd bytes of data: ", nread);
-  for (j = 0; j < nread && j < 32; j++) {
-    printf("%02x ", (unsigned char)buf->base[j]);
-  }
-  if (nread > 32) printf("...");
-  printf("\n");
 
   wr = (write_req_t*) malloc(sizeof *wr);
   assert(wr != NULL);
   wr->buf = uv_buf_init(buf->base, nread);
 
-  printf("[SERVER] Echoing back %zd bytes\n", nread);
   int write_result = uvkcp_write(&wr->req, handle, &wr->buf, 1, after_write);
   if (write_result) {
-    printf("[SERVER] uvkcp_write failed with error: %d\n", write_result);
-  } else {
-    printf("[SERVER] uvkcp_write succeeded\n");
+    fprintf(stderr, "[SERVER] uvkcp_write failed with error: %d\n", write_result);
   }
 }
 
@@ -114,14 +156,14 @@ static void echo_alloc(uv_handle_t* handle,
 static void on_connection(uvkcp_t* client, int status) {
   int r;
 
-  printf("[SERVER] Connection callback: status=%d\n", status);
-
   if (status != 0) {
     fprintf(stderr, "[SERVER] Connect error %s\n", uv_err_name(status));
     return;
-  } else {
-    printf("[SERVER] Connect success\n");
   }
+
+  // Display connection information for the new client
+  printf("\n[SERVER] New client connection established:\n");
+  display_kcp_connection_info(client, "SERVER-CLIENT");
 
   // With TCP handshake, the client stream is already fully connected
   // and ready for reading/writing. No need for uvkcp_accept.
@@ -129,7 +171,6 @@ static void on_connection(uvkcp_t* client, int status) {
 
   r = uvkcp_read_start(client, echo_alloc, after_read);
 
-  printf("[SERVER] Started reading on accepted stream, result=%d\n", r);
   if (r != 0) {
     fprintf(stderr, "[SERVER] uvkcp_read_start failed: %d\n", r);
     return;
@@ -222,8 +263,16 @@ int main(int argc, char *argv[]) {
   if (kcp6_echo_start(port))
     return 1;
 
-  printf("[SERVER] Server started successfully, running event loop...\n");
+  // Display server listening information
+  printf("\n[SERVER] Server listening information:\n");
+  if (server) {
+    display_kcp_connection_info(server, "SERVER");
+  }
+  if (server6) {
+    display_kcp_connection_info(server6, "SERVER-IPv6");
+  }
+  printf("\n[SERVER] Server ready for connections...\n\n");
+
   uv_run(loop, UV_RUN_DEFAULT);
-  printf("[SERVER] Event loop finished\n");
   return 0;
 }

@@ -4,8 +4,65 @@
 #include <stdio.h>
 #include <string.h> /* strlen */
 #include <assert.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 
 #define TEST_PORT (51686)
+
+// Helper function to display KCP connection information
+static void display_kcp_connection_info(uvkcp_t* handle, const char* role) {
+    // Get KCP conversation ID
+    kcp_context_t *ctx = (kcp_context_t *)handle->kcp_ctx;
+    if (!ctx || !ctx->kcp) {
+        printf("[%s] KCP context not available\n", role);
+        return;
+    }
+
+    uint32_t conv_id = ctx->kcp->conv;
+    printf("[%s] KCP Conversation ID: %u\n", role, conv_id);
+
+    // Get peer address (remote endpoint)
+    struct sockaddr_storage peer_addr;
+    int addr_len = sizeof(peer_addr);
+    if (uvkcp_getpeername(handle, (struct sockaddr*)&peer_addr, &addr_len) == 0) {
+        char ip_str[INET6_ADDRSTRLEN];
+        uint16_t port;
+
+        if (peer_addr.ss_family == AF_INET) {
+            struct sockaddr_in *addr_in = (struct sockaddr_in*)&peer_addr;
+            inet_ntop(AF_INET, &addr_in->sin_addr, ip_str, sizeof(ip_str));
+            port = ntohs(addr_in->sin_port);
+        } else {
+            struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6*)&peer_addr;
+            inet_ntop(AF_INET6, &addr_in6->sin6_addr, ip_str, sizeof(ip_str));
+            port = ntohs(addr_in6->sin6_port);
+        }
+        printf("[%s] Connected to: %s:%d\n", role, ip_str, port);
+    } else {
+        printf("[%s] Peer address not available\n", role);
+    }
+
+    // Get local address
+    struct sockaddr_storage local_addr;
+    addr_len = sizeof(local_addr);
+    if (uvkcp_getsockname(handle, (struct sockaddr*)&local_addr, &addr_len) == 0) {
+        char ip_str[INET6_ADDRSTRLEN];
+        uint16_t port;
+
+        if (local_addr.ss_family == AF_INET) {
+            struct sockaddr_in *addr_in = (struct sockaddr_in*)&local_addr;
+            inet_ntop(AF_INET, &addr_in->sin_addr, ip_str, sizeof(ip_str));
+            port = ntohs(addr_in->sin_port);
+        } else {
+            struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6*)&local_addr;
+            inet_ntop(AF_INET6, &addr_in6->sin6_addr, ip_str, sizeof(ip_str));
+            port = ntohs(addr_in6->sin6_port);
+        }
+        printf("[%s] Local endpoint: %s:%d\n", role, ip_str, port);
+    } else {
+        printf("[%s] Local address not available\n", role);
+    }
+}
 
 #define SERVER_MAX_NUM 1
 #define CLIENT_MAX_NUM 1
@@ -107,43 +164,27 @@ static void pinger_read_cb(uvkcp_t* kcp, ssize_t nread, const uv_buf_t * buf) {
 
   pinger = (pinger_t*)((uv_handle_t*)kcp)->data;
 
-  printf("[CLIENT] Read callback: nread=%zd, buf_base=%p, buf_len=%zu\n", nread, buf->base, buf->len);
-
   if (nread < 0) {
     if (buf->base) {
       buf_free(buf);
     }
 
-    printf("[CLIENT] Read error: %zd (%s)\n", nread, uv_err_name(nread));
+    fprintf(stderr, "[CLIENT] Read error: %zd (%s)\n", nread, uv_err_name(nread));
     assert(nread == UV_EOF);
 
     return;
   }
 
-  // Log the actual data received
-  printf("[CLIENT] Received %zd bytes of data: ", nread);
-  for (i = 0; i < nread && i < 32; i++) {
-    printf("%02x ", (unsigned char)buf->base[i]);
-  }
-  if (nread > 32) printf("...");
-  printf("\n");
-
   /* Now we count the pings */
   for (i = 0; i < nread; i++) {
-    printf("[CLIENT] Checking byte %zd: expected='%c'(0x%02x), actual='%c'(0x%02x)\n",
-           i, PING[pinger->state], (unsigned char)PING[pinger->state],
-           buf->base[i], (unsigned char)buf->base[i]);
     assert(buf->base[i] == PING[pinger->state]);
     pinger->state = (pinger->state + 1) % (sizeof(PING) - 1);
     if (pinger->state == 0) {
       pinger->pongs++;
-      printf("[CLIENT] Received PONG #%d\n", pinger->pongs);
       if (uv_now(loop) - start_time > TIME) {
-        printf("[CLIENT] Time expired, shutting down\n");
         uvkcp_shutdown(&pinger->shutdown_req, kcp, pinger_shutdown_cb);
         break;
       } else {
-        printf("[CLIENT] Writing next PING\n");
         pinger_write_ping(pinger);
       }
     }
@@ -156,21 +197,20 @@ static void pinger_read_cb(uvkcp_t* kcp, ssize_t nread, const uv_buf_t * buf) {
 static void pinger_connect_cb(uvkcp_connect_t* req, int status) {
   pinger_t *pinger = (pinger_t*)((uv_handle_t*)req->handle)->data;
 
-  printf("[CLIENT] Connect callback: status=%d (%s)\n", status, uv_err_name(status));
-
   if (status != 0) {
-    printf("[CLIENT] Connection failed, not proceeding with PING\n");
+    fprintf(stderr, "[CLIENT] Connection failed: %d (%s)\n", status, uv_err_name(status));
     return;
   }
 
-  printf("[CLIENT] Connection successful, writing initial PING\n");
+  // Display connection information
+  printf("\n[CLIENT] Connection established successfully:\n");
+  display_kcp_connection_info(req->handle, "CLIENT");
+
   pinger_write_ping(pinger);
 
   int read_start_result = uvkcp_read_start(req->handle, buf_alloc, pinger_read_cb);
   if (read_start_result) {
-    printf("[CLIENT] uvkcp_read_start failed with error: %d\n", read_start_result);
-  } else {
-    printf("[CLIENT] Started reading successfully\n");
+    fprintf(stderr, "[CLIENT] uvkcp_read_start failed with error: %d\n", read_start_result);
   }
 }
 

@@ -848,6 +848,14 @@ static void echo_alloc(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf
     buf->len = suggested_size;
 }
 
+// Structure to store TCP client and its address
+struct tcp_client_info_s {
+    uv_tcp_t tcp_client;
+    struct sockaddr_storage client_addr;
+    socklen_t client_addr_len;
+};
+typedef struct tcp_client_info_s tcp_client_info_t;
+
 // TCP connection callback for server
 static void tcp_connection_cb(uv_stream_t *server, int status)
 {
@@ -860,35 +868,64 @@ static void tcp_connection_cb(uv_stream_t *server, int status)
     uvkcp_t *kcp_server = (uvkcp_t *)server->data;
     kcp_context_t *server_ctx = (kcp_context_t *)kcp_server->kcp_ctx;
 
-    uv_tcp_t *tcp_client = malloc(sizeof(uv_tcp_t));
-    if (!tcp_client)
+    tcp_client_info_t *client_info = malloc(sizeof(tcp_client_info_t));
+    if (!client_info)
     {
-        UVKCP_LOG_ERROR("Failed to allocate TCP client");
+        UVKCP_LOG_ERROR("Failed to allocate TCP client info");
         return;
     }
 
-    if (uv_tcp_init(server_ctx->loop, tcp_client) < 0)
+    if (uv_tcp_init(server_ctx->loop, &client_info->tcp_client) < 0)
     {
         UVKCP_LOG_ERROR("Failed to initialize TCP client");
-        free(tcp_client);
+        free(client_info);
         return;
     }
 
-    tcp_client->data = kcp_server;
+    // Store the KCP server in the TCP client data
+    client_info->tcp_client.data = kcp_server;
 
-    if (uv_accept(server, (uv_stream_t *)tcp_client) == 0)
+    if (uv_accept(server, (uv_stream_t *)&client_info->tcp_client) == 0)
     {
         UVKCP_LOG("Accepted TCP connection for KCP handshake");
 
+        // Get the client's TCP address
+        client_info->client_addr_len = sizeof(client_info->client_addr);
+        int r = uv_tcp_getpeername(&client_info->tcp_client,
+                                  (struct sockaddr *)&client_info->client_addr,
+                                  &client_info->client_addr_len);
+        if (r == 0)
+        {
+            if (client_info->client_addr.ss_family == AF_INET)
+            {
+                struct sockaddr_in *addr_in = (struct sockaddr_in *)&client_info->client_addr;
+                char ip_str[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &addr_in->sin_addr, ip_str, sizeof(ip_str));
+                UVKCP_LOG("Client TCP address: %s:%d", ip_str, ntohs(addr_in->sin_port));
+            }
+            else if (client_info->client_addr.ss_family == AF_INET6)
+            {
+                struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)&client_info->client_addr;
+                char ip_str[INET6_ADDRSTRLEN];
+                inet_ntop(AF_INET6, &addr_in6->sin6_addr, ip_str, sizeof(ip_str));
+                UVKCP_LOG("Client TCP address: [%s]:%d", ip_str, ntohs(addr_in6->sin6_port));
+            }
+        }
+        else
+        {
+            UVKCP_LOG_ERROR("Failed to get client TCP address: %d", r);
+        }
+
         // Start reading handshake request
-        uv_read_start((uv_stream_t *)tcp_client,
+        uv_read_start((uv_stream_t *)&client_info->tcp_client,
                       (uv_alloc_cb)echo_alloc,
                       tcp_handshake_read_cb);
     }
     else
     {
         UVKCP_LOG_ERROR("Failed to accept TCP connection");
-        uv_close((uv_handle_t *)tcp_client, NULL);
+        uv_close((uv_handle_t *)&client_info->tcp_client, NULL);
+        free(client_info);
     }
 }
 
@@ -920,6 +957,28 @@ static void tcp_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread, const 
                   handshake->peer_addr[4], handshake->peer_addr[5], handshake->peer_addr[6], handshake->peer_addr[7],
                   handshake->peer_addr[8], handshake->peer_addr[9], handshake->peer_addr[10], handshake->peer_addr[11],
                   handshake->peer_addr[12], handshake->peer_addr[13], handshake->peer_addr[14], handshake->peer_addr[15]);
+
+        // Get the client's TCP address for cross-host communication
+        struct sockaddr_storage tcp_client_addr;
+        socklen_t tcp_client_addr_len = sizeof(tcp_client_addr);
+        int tcp_addr_result = uv_tcp_getpeername((uv_tcp_t *)tcp_client,
+                                                 (struct sockaddr *)&tcp_client_addr,
+                                                 &tcp_client_addr_len);
+        if (tcp_addr_result == 0) {
+            if (tcp_client_addr.ss_family == AF_INET) {
+                struct sockaddr_in *addr_in = (struct sockaddr_in *)&tcp_client_addr;
+                char ip_str[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &addr_in->sin_addr, ip_str, sizeof(ip_str));
+                UVKCP_LOG("Client TCP address (from TCP connection): %s:%d", ip_str, ntohs(addr_in->sin_port));
+            } else if (tcp_client_addr.ss_family == AF_INET6) {
+                struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)&tcp_client_addr;
+                char ip_str[INET6_ADDRSTRLEN];
+                inet_ntop(AF_INET6, &addr_in6->sin6_addr, ip_str, sizeof(ip_str));
+                UVKCP_LOG("Client TCP address (from TCP connection): [%s]:%d", ip_str, ntohs(addr_in6->sin6_port));
+            }
+        } else {
+            UVKCP_LOG_ERROR("Failed to get client TCP address: %d", tcp_addr_result);
+        }
 
         // Create response handshake
         kcp_handshake_t response;
@@ -1098,30 +1157,60 @@ static void tcp_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread, const 
                                 ikcp_wndsize(ctx->kcp, 128, 128);
                                 ikcp_setmtu(ctx->kcp, 1400);
 
-                                // Set peer address from handshake
-                                if (handshake->addr_family == AF_INET)
+                                // Set peer address from TCP connection (for cross-host communication)
+                                if (tcp_client_addr.ss_family == AF_INET)
                                 {
+                                    struct sockaddr_in *tcp_addr = (struct sockaddr_in *)&tcp_client_addr;
                                     struct sockaddr_in *peer = (struct sockaddr_in *)&ctx->peer_addr;
                                     peer->sin_family = AF_INET;
                                     peer->sin_port = handshake->udp_port;
-                                    memcpy(&peer->sin_addr, handshake->peer_addr, 4);
+                                    memcpy(&peer->sin_addr, &tcp_addr->sin_addr, 4);
                                     ctx->peer_addr_len = sizeof(struct sockaddr_in);
 
                                     char ip_str[INET_ADDRSTRLEN];
                                     inet_ntop(AF_INET, &peer->sin_addr, ip_str, sizeof(ip_str));
-                                    UVKCP_LOG("Server: Set IPv4 peer address: %s:%d", ip_str, ntohs(peer->sin_port));
+                                    UVKCP_LOG("Server: Set IPv4 peer address from TCP: %s:%d", ip_str, ntohs(peer->sin_port));
                                 }
-                                else
+                                else if (tcp_client_addr.ss_family == AF_INET6)
                                 {
+                                    struct sockaddr_in6 *tcp_addr = (struct sockaddr_in6 *)&tcp_client_addr;
                                     struct sockaddr_in6 *peer = (struct sockaddr_in6 *)&ctx->peer_addr;
                                     peer->sin6_family = AF_INET6;
                                     peer->sin6_port = handshake->udp_port;
-                                    memcpy(&peer->sin6_addr, handshake->peer_addr, 16);
+                                    memcpy(&peer->sin6_addr, &tcp_addr->sin6_addr, 16);
                                     ctx->peer_addr_len = sizeof(struct sockaddr_in6);
 
                                     char ip_str[INET6_ADDRSTRLEN];
                                     inet_ntop(AF_INET6, &peer->sin6_addr, ip_str, sizeof(ip_str));
-                                    UVKCP_LOG("Server: Set IPv6 peer address: [%s]:%d", ip_str, ntohs(peer->sin6_port));
+                                    UVKCP_LOG("Server: Set IPv6 peer address from TCP: [%s]:%d", ip_str, ntohs(peer->sin6_port));
+                                }
+                                else
+                                {
+                                    // Fallback to handshake-provided address if TCP address not available
+                                    if (handshake->addr_family == AF_INET)
+                                    {
+                                        struct sockaddr_in *peer = (struct sockaddr_in *)&ctx->peer_addr;
+                                        peer->sin_family = AF_INET;
+                                        peer->sin_port = handshake->udp_port;
+                                        memcpy(&peer->sin_addr, handshake->peer_addr, 4);
+                                        ctx->peer_addr_len = sizeof(struct sockaddr_in);
+
+                                        char ip_str[INET_ADDRSTRLEN];
+                                        inet_ntop(AF_INET, &peer->sin_addr, ip_str, sizeof(ip_str));
+                                        UVKCP_LOG("Server: Set IPv4 peer address from handshake: %s:%d", ip_str, ntohs(peer->sin_port));
+                                    }
+                                    else
+                                    {
+                                        struct sockaddr_in6 *peer = (struct sockaddr_in6 *)&ctx->peer_addr;
+                                        peer->sin6_family = AF_INET6;
+                                        peer->sin6_port = handshake->udp_port;
+                                        memcpy(&peer->sin6_addr, handshake->peer_addr, 16);
+                                        ctx->peer_addr_len = sizeof(struct sockaddr_in6);
+
+                                        char ip_str[INET6_ADDRSTRLEN];
+                                        inet_ntop(AF_INET6, &peer->sin6_addr, ip_str, sizeof(ip_str));
+                                        UVKCP_LOG("Server: Set IPv6 peer address from handshake: [%s]:%d", ip_str, ntohs(peer->sin6_port));
+                                    }
                                 }
 
                                 // Mark as connected
