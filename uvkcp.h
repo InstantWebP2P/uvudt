@@ -41,9 +41,38 @@ typedef void (* uvkcp_write_cb)(struct uvkcp_write_s *req, int status);
 typedef void (* uvkcp_read_cb)(struct uvkcp_s *stream, ssize_t nread, const uv_buf_t *buf);
 typedef void (* uvkcp_connection_cb)(struct uvkcp_s *server, int status);
 
-// Forward declaration for KCP context
+// Forward declarations
 struct kcp_context_s;
 typedef struct kcp_context_s kcp_context_t;
+struct uvkcp_s;
+typedef struct uvkcp_s uvkcp_t;
+
+// Performance monitoring structure
+typedef struct uvkcp_netperf_s {
+    int64_t msTimeStamp;          // Timestamp of the performance data
+    int64_t pktSentTotal;         // Total packets sent
+    int64_t pktRecvTotal;         // Total packets received
+    int pktSndLossTotal;          // Total send packet loss
+    int pktRcvLossTotal;          // Total receive packet loss
+    int pktRetransTotal;          // Total packet retransmissions
+    int pktSentACKTotal;          // Total ACK packets sent
+    int pktRecvACKTotal;          // Total ACK packets received
+    int pktSentNAKTotal;          // Total NAK packets sent
+    int pktRecvNAKTotal;          // Total NAK packets received
+    int64_t usSndDurationTotal;   // Total send duration in microseconds
+    double mbpsSendRate;          // Send rate in Mbps
+    double mbpsRecvRate;          // Receive rate in Mbps
+    double mbpsBandwidth;         // Estimated bandwidth in Mbps
+    int pktFlowWindow;            // Flow window size
+    int pktCongestionWindow;      // Congestion window size
+    int pktFlightSize;            // Packets in flight
+    int msRTT;                    // Round-trip time in milliseconds
+    int byteAvailSndBuf;          // Available send buffer bytes
+    int byteAvailRcvBuf;          // Available receive buffer bytes
+} uvkcp_netperf_t;
+
+// Performance monitoring callbacks
+typedef void (*uvkcp_perf_cb)(uvkcp_t *handle, const uvkcp_netperf_t *perf);
 
 // KCP context structure
 struct kcp_context_s {
@@ -87,6 +116,14 @@ struct kcp_context_s {
     int64_t bytesSentTotal;
     int64_t bytesRecvTotal;
     IUINT32 lastUpdateTime;
+
+    // Performance optimization flags
+    int high_performance_mode;  // Enable aggressive timer and buffer optimizations
+
+    // Performance monitoring
+    uvkcp_perf_cb perf_cb;      // Performance callback function
+    uv_timer_t perf_timer;      // Timer for periodic performance callbacks
+    int perf_interval;          // Performance callback interval in ms
 };
 
 // KCP handshake protocol structures
@@ -172,7 +209,6 @@ struct uvkcp_s
     // Private KCP context
     void *kcp_ctx;
 };
-typedef struct uvkcp_s uvkcp_t;
 
 // request type
 enum uvkcp_req_e
@@ -303,49 +339,11 @@ UV_EXTERN int uvkcp_is_writable(uvkcp_t *handle);
 
 UV_EXTERN int uvkcp_set_blocking(uvkcp_t *handle, int blocking);
 
+// Performance optimization APIs
+UV_EXTERN int uvkcp_set_high_performance(uvkcp_t *handle, int enable);
 
-// KCP network performance track
-typedef struct uvkcp_netperf_s
-{
-    // global measurements
-    int64_t msTimeStamp;        // time since the KCP entity is started, in milliseconds
-    int64_t pktSentTotal;       // total number of sent data packets, including retransmissions
-    int64_t pktRecvTotal;       // total number of received packets
-    int pktSndLossTotal;        // total number of lost packets (sender side)
-    int pktRcvLossTotal;        // total number of lost packets (receiver side)
-    int pktRetransTotal;        // total number of retransmitted packets
-    int pktSentACKTotal;        // total number of sent ACK packets
-    int pktRecvACKTotal;        // total number of received ACK packets
-    int pktSentNAKTotal;        // total number of sent NAK packets
-    int pktRecvNAKTotal;        // total number of received NAK packets
-    int64_t usSndDurationTotal; // total time duration when KCP is sending data (idle time exclusive)
 
-    // local measurements
-    int64_t pktSent;            // number of sent data packets, including retransmissions
-    int64_t pktRecv;            // number of received packets
-    int pktSndLoss;             // number of lost packets (sender side)
-    int pktRcvLoss;             // number of lost packets (receiver side)
-    int pktRetrans;             // number of retransmitted packets
-    int pktSentACK;             // number of sent ACK packets
-    int pktRecvACK;             // number of received ACK packets
-    int pktSentNAK;             // number of sent NAK packets
-    int pktRecvNAK;             // number of received NAK packets
-    double mbpsSendRate;        // sending rate in Mb/s
-    double mbpsRecvRate;        // receiving rate in Mb/s
-    int64_t usSndDuration;      // busy sending time (i.e., idle time exclusive)
 
-    // instant measurements
-    double usPktSndPeriod;      // packet sending period, in microseconds
-    int pktFlowWindow;          // flow window size, in number of packets
-    int pktCongestionWindow;    // congestion window size, in number of packets
-    int pktFlightSize;          // number of packets on flight
-    double msRTT;               // RTT, in milliseconds
-    double mbpsBandwidth;       // estimated bandwidth, in Mb/s
-    int byteAvailSndBuf;        // available KCP sender buffer size
-    int byteAvailRcvBuf;        // available KCP receiver buffer size
-} uvkcp_netperf_t;
-
-UV_EXTERN int uvkcp_getperf(uvkcp_t *handle, uvkcp_netperf_t *perf, int clear);
 
 // internal api
 UV_EXTERN int  uvkcp_translate_kcp_error(void);

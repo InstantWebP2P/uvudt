@@ -44,8 +44,27 @@ void kcp__interval_cb(uv_timer_t *timer)
     // Update KCP state - this will flush any pending output
     ikcp_update(ctx->kcp, current);
 
+    // Use ikcp_check to determine the optimal next update time
+    IUINT32 next_update = ikcp_check(ctx->kcp, current);
+    IUINT32 delay = (next_update > current) ? (next_update - current) : 1;
+
+    // Ensure minimum delay of 1ms and maximum of 50ms for faster response
+    // For high-performance mode, use even tighter bounds
+    if (delay < 1) delay = 1;
+    if (delay > 50) delay = 50;
+
+    // High-performance optimization: reduce maximum delay for low-latency scenarios
+    // This provides faster response times at the cost of slightly higher CPU usage
+    if (ctx->high_performance_mode && delay > 10 && ctx->is_connected && ctx->kcp->state == 0) {
+        delay = 10; // Force much faster updates in high-performance mode
+    } else if (delay > 25 && ctx->is_connected && ctx->kcp->state == 0) {
+        delay = 25; // Force faster updates when connected and in normal state
+    }
+
+    // Restart timer with adaptive interval
+    uv_timer_start(&ctx->timer_handle, kcp__interval_cb, delay, 0);
+
     ctx->timer_active = 1;
-    ///UVKCP_LOG("KCP interval update completed");
 }
 
 // KCP debug logging callback
@@ -160,6 +179,14 @@ int uvkcp_init(uv_loop_t *loop, uvkcp_t *handle)
     ctx->bytesRecvTotal = 0;
     ctx->lastUpdateTime = 0;
 
+    // Initialize performance optimization flags
+    ctx->high_performance_mode = 0;  // Default to balanced mode
+
+    // Initialize performance monitoring
+    ctx->perf_cb = NULL;
+    ctx->perf_interval = 0;
+    memset(&ctx->perf_timer, 0, sizeof(ctx->perf_timer));
+
     // Initialize conversation registry
     ctx->conv_registry = NULL;
 
@@ -171,7 +198,7 @@ int uvkcp_init(uv_loop_t *loop, uvkcp_t *handle)
         return UV_ENOMEM;
     }
     ctx->timer_handle.data = ctx;
-    ctx->update_interval = 10; // Default 10ms interval for KCP updates
+    ctx->update_interval = 10; // Default 10ms interval for KCP updates (legacy, now adaptive)
 
     // Store context in handle
     handle->kcp_ctx = ctx;
@@ -246,11 +273,9 @@ int uvkcp_bind(uvkcp_t *handle, const struct sockaddr *addr, int reuseaddr, int 
 
     // Log the TCP port we're binding to
     if (addr->sa_family == AF_INET) {
-        struct sockaddr_in *addr_in = (struct sockaddr_in *)addr;
-        UVKCP_LOG("KCP handle bound to TCP4 handshake socket on port %d, ready for listening", ntohs(addr_in->sin_port));
+        UVKCP_LOG("KCP handle bound to TCP4 handshake socket on port %d, ready for listening", ntohs(((struct sockaddr_in *)addr)->sin_port));
     } else if (addr->sa_family == AF_INET6) {
-        struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)addr;
-        UVKCP_LOG("KCP handle bound to TCP6 handshake socket on port %d, ready for listening", ntohs(addr_in6->sin6_port));
+        UVKCP_LOG("KCP handle bound to TCP6 handshake socket on port %d, ready for listening", ntohs(((struct sockaddr_in6 *)addr)->sin6_port));
     }
 
     // UDP socket will be created later for each client connection
@@ -374,12 +399,20 @@ int uvkcp_close(uvkcp_t *handle, uv_close_cb close_cb)
     // Set closing flag
     handle->flags |= UVKCP_FLAG_CLOSING;
 
-    // Stop timer
+    // Stop timers
     if (ctx->timer_active)
     {
         UVKCP_LOG("Stopping KCP interval timer");
         uv_timer_stop(&ctx->timer_handle);
         ctx->timer_active = 0;
+    }
+
+    // Stop performance monitoring timer
+    if (ctx->perf_interval > 0)
+    {
+        UVKCP_LOG("Stopping performance monitoring timer");
+        uv_timer_stop(&ctx->perf_timer);
+        uv_close((uv_handle_t *)&ctx->perf_timer, NULL);
     }
 
     // Cleanup KCP
@@ -577,6 +610,22 @@ int uvkcp_getperf(uvkcp_t *handle, uvkcp_netperf_t *perf, int clear)
         }
     }
 
+    // Enhanced KCP statistics from ikcp structure
+    if (ctx->kcp) {
+        perf->pktFlowWindow = ctx->kcp->rcv_wnd;
+        perf->pktCongestionWindow = ctx->kcp->cwnd;
+        perf->pktFlightSize = ctx->kcp->snd_nxt - ctx->kcp->snd_una;
+        perf->msRTT = ctx->kcp->rx_rttval;
+        // Note: KCP doesn't expose buffer size/count directly, using queue counts as approximation
+        perf->byteAvailSndBuf = 0;  // Not directly available from KCP
+        perf->byteAvailRcvBuf = 0;  // Not directly available from KCP
+
+        // Calculate bandwidth estimation based on KCP state
+        if (perf->msRTT > 0) {
+            perf->mbpsBandwidth = (perf->pktCongestionWindow * ctx->kcp->mtu * 8.0) / (perf->msRTT / 1000.0) / 1000000.0;
+        }
+    }
+
     // Update last update time
     ctx->lastUpdateTime = current;
 
@@ -709,7 +758,6 @@ static void cleanup_conv_registry(kcp_context_t *ctx)
         return;
     }
 
-    int total_entries = 0;
     int i;
     for (i = 0; i < CONV_REGISTRY_SIZE; i++)
     {
@@ -720,7 +768,6 @@ static void cleanup_conv_registry(kcp_context_t *ctx)
             conv_registry_entry_t *next = entry->next;
             free(entry);
             entry = next;
-            total_entries++;
         }
         *bucket = NULL;
     }
@@ -891,9 +938,11 @@ static void tcp_connection_cb(uv_stream_t *server, int status)
 
         // Get the client's TCP address
         client_info->client_addr_len = sizeof(client_info->client_addr);
+        int addr_len = (int)client_info->client_addr_len;
         int r = uv_tcp_getpeername(&client_info->tcp_client,
                                   (struct sockaddr *)&client_info->client_addr,
-                                  &client_info->client_addr_len);
+                                  &addr_len);
+        client_info->client_addr_len = (socklen_t)addr_len;
         if (r == 0)
         {
             if (client_info->client_addr.ss_family == AF_INET)
@@ -947,9 +996,8 @@ static void tcp_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread, const 
         kcp_context_t *server_ctx = (kcp_context_t *)kcp_server->kcp_ctx;
 
         // Process handshake request
-        uint32_t conv = ntohl(handshake->conv);
         UVKCP_LOG("Received KCP handshake request: conv=%u, addr_family=%d, udp_port=%d",
-                  conv, handshake->addr_family, ntohs(handshake->udp_port));
+                  ntohl(handshake->conv), handshake->addr_family, ntohs(handshake->udp_port));
 
         // Debug log the peer address bytes
         UVKCP_LOG("Handshake peer_addr bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
@@ -961,9 +1009,11 @@ static void tcp_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread, const 
         // Get the client's TCP address for cross-host communication
         struct sockaddr_storage tcp_client_addr;
         socklen_t tcp_client_addr_len = sizeof(tcp_client_addr);
+        int addr_len = (int)tcp_client_addr_len;
         int tcp_addr_result = uv_tcp_getpeername((uv_tcp_t *)tcp_client,
                                                  (struct sockaddr *)&tcp_client_addr,
-                                                 &tcp_client_addr_len);
+                                                 &addr_len);
+        tcp_client_addr_len = (socklen_t)addr_len;
         if (tcp_addr_result == 0) {
             if (tcp_client_addr.ss_family == AF_INET) {
                 struct sockaddr_in *addr_in = (struct sockaddr_in *)&tcp_client_addr;
@@ -1118,13 +1168,11 @@ static void tcp_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread, const 
                             {
                                 if (local_addr.ss_family == AF_INET)
                                 {
-                                    struct sockaddr_in *addr_in = (struct sockaddr_in *)&local_addr;
-                                    UVKCP_LOG("Server UDP socket bound to port %d for KCP communication", ntohs(addr_in->sin_port));
+                                    UVKCP_LOG("Server UDP socket bound to port %d for KCP communication", ntohs(((struct sockaddr_in *)&local_addr)->sin_port));
                                 }
                                 else if (local_addr.ss_family == AF_INET6)
                                 {
-                                    struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)&local_addr;
-                                    UVKCP_LOG("Server UDP socket bound to port %d for KCP communication", ntohs(addr_in6->sin6_port));
+                                    UVKCP_LOG("Server UDP socket bound to port %d for KCP communication", ntohs(((struct sockaddr_in6 *)&local_addr)->sin6_port));
                                 }
                             }
                             else
@@ -1153,8 +1201,8 @@ static void tcp_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread, const 
                                 ctx->kcp->writelog = kcp_writelog;
                                 ctx->kcp->logmask = IKCP_LOG_OUTPUT | IKCP_LOG_INPUT | IKCP_LOG_SEND | IKCP_LOG_RECV | IKCP_LOG_IN_DATA | IKCP_LOG_IN_ACK;
 #endif
-                                ikcp_nodelay(ctx->kcp, 1, 10, 2, 1);
-                                ikcp_wndsize(ctx->kcp, 128, 128);
+                                ikcp_nodelay(ctx->kcp, 1, 5, 1, 1);
+                                ikcp_wndsize(ctx->kcp, 512, 512);
                                 ikcp_setmtu(ctx->kcp, 1400);
 
                                 // Set peer address from TCP connection (for cross-host communication)
@@ -1220,10 +1268,14 @@ static void tcp_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread, const 
                                 IUINT32 current = uv_now(ctx->loop);
                                 ikcp_update(ctx->kcp, current);
 
-                                // Start interval timer with fixed interval
-                                uv_timer_start(&ctx->timer_handle, kcp__interval_cb, ctx->update_interval, ctx->update_interval);
+                                IUINT32 next_update = ikcp_check(ctx->kcp, current);
+                                IUINT32 delay = (next_update > current) ? (next_update - current) : 1;
+                                if (delay < 1) delay = 1;
+                                if (delay > 50) delay = 50;
+
+                                uv_timer_start(&ctx->timer_handle, kcp__interval_cb, delay, 0);
                                 ctx->timer_active = 1;
-                                UVKCP_LOG("Started KCP interval for server connection, interval=%u ms", ctx->update_interval);
+                                UVKCP_LOG("Started adaptive KCP interval for server connection, initial delay=%u ms", delay);
 
                                 // Open the KCP stream
                                 if (kcp__stream_open(client, sock, UVKCP_FLAG_READABLE | UVKCP_FLAG_WRITABLE) == 0)
@@ -1428,13 +1480,11 @@ static void tcp_connect_cb(uv_connect_t *req, int status)
         {
             if (client_addr.ss_family == AF_INET)
             {
-                struct sockaddr_in *addr_in = (struct sockaddr_in *)&client_addr;
-                UVKCP_LOG("Client UDP socket bound to port %d for KCP communication", ntohs(addr_in->sin_port));
+                UVKCP_LOG("Client UDP socket bound to port %d for KCP communication", ntohs(((struct sockaddr_in *)&client_addr)->sin_port));
             }
             else if (client_addr.ss_family == AF_INET6)
             {
-                struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)&client_addr;
-                UVKCP_LOG("Client UDP socket bound to port %d for KCP communication", ntohs(addr_in6->sin6_port));
+                UVKCP_LOG("Client UDP socket bound to port %d for KCP communication", ntohs(((struct sockaddr_in6 *)&client_addr)->sin6_port));
             }
         }
 
@@ -1549,6 +1599,8 @@ static void tcp_client_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread,
             error_desc = "Connection refused";
         }
 
+        // This variable is used in the log message below, but compiler may not detect it
+        (void)error_desc; // Suppress unused variable warning
         UVKCP_LOG_ERROR("Client handshake read error: %zd (%s)", nread, error_desc);
 
         // Clean up any partially created UDP socket
@@ -1604,8 +1656,8 @@ static void tcp_client_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread,
                     ctx->kcp->logmask = IKCP_LOG_OUTPUT | IKCP_LOG_INPUT | IKCP_LOG_SEND | IKCP_LOG_RECV | IKCP_LOG_IN_DATA | IKCP_LOG_IN_ACK;
 #endif
 
-                    ikcp_nodelay(ctx->kcp, 1, 10, 2, 1);
-                    ikcp_wndsize(ctx->kcp, 128, 128);
+                    ikcp_nodelay(ctx->kcp, 1, 5, 1, 1);
+                    ikcp_wndsize(ctx->kcp, 512, 512);
                     ikcp_setmtu(ctx->kcp, 1400);
 
                     // Set peer address from handshake
@@ -1677,10 +1729,14 @@ static void tcp_client_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread,
                     IUINT32 current = uv_now(ctx->loop);
                     ikcp_update(ctx->kcp, current);
 
-                    // Start interval timer with fixed interval
-                    uv_timer_start(&ctx->timer_handle, kcp__interval_cb, ctx->update_interval, ctx->update_interval);
+                    IUINT32 next_update = ikcp_check(ctx->kcp, current);
+                    IUINT32 delay = (next_update > current) ? (next_update - current) : 1;
+                    if (delay < 1) delay = 1;
+                    if (delay > 50) delay = 50;
+
+                    uv_timer_start(&ctx->timer_handle, kcp__interval_cb, delay, 0);
                     ctx->timer_active = 1;
-                    UVKCP_LOG("Started KCP interval for client connection, interval=%u ms", ctx->update_interval);
+                    UVKCP_LOG("Started adaptive KCP interval for client connection, initial delay=%u ms", delay);
 
                     // Open the KCP stream
                     if (kcp__stream_open(client, ctx->udp_fd, UVKCP_FLAG_READABLE | UVKCP_FLAG_WRITABLE) == 0)
@@ -1762,4 +1818,94 @@ static void tcp_client_handshake_read_cb(uv_stream_t *tcp_client, ssize_t nread,
     }
 
     free(buf->base);
+}
+
+// Performance callback timer function
+static void perf_timer_cb(uv_timer_t *timer)
+{
+    kcp_context_t *ctx = (kcp_context_t *)timer->data;
+    if (!ctx || !ctx->perf_cb)
+    {
+        return;
+    }
+
+    uvkcp_netperf_t perf;
+    if (uvkcp_getperf((uvkcp_t *)ctx->perf_timer.data, &perf, 0) == 0)
+    {
+        uvkcp_perf_cb cb = (uvkcp_perf_cb)ctx->perf_cb;
+        cb((uvkcp_t *)ctx->perf_timer.data, &perf);
+    }
+}
+
+// Set high-performance mode for aggressive optimizations
+int uvkcp_set_high_performance(uvkcp_t *handle, int enable)
+{
+    kcp_context_t *ctx = (kcp_context_t *)handle->kcp_ctx;
+    if (!ctx)
+    {
+        return UV_EINVAL;
+    }
+
+    ctx->high_performance_mode = enable ? 1 : 0;
+
+    // Apply high-performance KCP settings if enabled
+    if (enable && ctx->kcp)
+    {
+        // Use most aggressive settings for maximum performance
+        ikcp_nodelay(ctx->kcp, 1, 1, 1, 1);  // Fastest nodelay settings
+        ikcp_wndsize(ctx->kcp, 1024, 1024);  // Larger windows for throughput
+        ikcp_setmtu(ctx->kcp, 1400);
+
+        UVKCP_LOG("High-performance mode enabled with aggressive KCP settings");
+    }
+    else if (!enable && ctx->kcp)
+    {
+        // Revert to balanced performance settings
+        ikcp_nodelay(ctx->kcp, 1, 5, 1, 1);  // Balanced nodelay settings
+        ikcp_wndsize(ctx->kcp, 512, 512);    // Moderate windows
+        ikcp_setmtu(ctx->kcp, 1400);
+
+        UVKCP_LOG("High-performance mode disabled, using balanced settings");
+    }
+
+    return 0;
+}
+
+// Set performance monitoring callback
+int uvkcp_set_perf_callback(uvkcp_t *handle, uvkcp_perf_cb cb, int interval_ms)
+{
+    kcp_context_t *ctx = (kcp_context_t *)handle->kcp_ctx;
+    if (!ctx)
+    {
+        return UV_EINVAL;
+    }
+
+    // Stop existing timer if any
+    if (ctx->perf_interval > 0)
+    {
+        uv_timer_stop(&ctx->perf_timer);
+    }
+
+    ctx->perf_cb = (void *)cb;
+    ctx->perf_interval = interval_ms;
+
+    // Initialize timer if callback is set and interval is positive
+    if (cb && interval_ms > 0)
+    {
+        if (uv_timer_init(ctx->loop, &ctx->perf_timer) != 0)
+        {
+            UVKCP_LOG_ERROR("Failed to initialize performance timer");
+            return UV_ENOMEM;
+        }
+
+        ctx->perf_timer.data = handle;
+        uv_timer_start(&ctx->perf_timer, perf_timer_cb, interval_ms, interval_ms);
+        UVKCP_LOG("Performance monitoring callback set with interval %d ms", interval_ms);
+    }
+    else
+    {
+        UVKCP_LOG("Performance monitoring callback disabled");
+    }
+
+    return 0;
 }
